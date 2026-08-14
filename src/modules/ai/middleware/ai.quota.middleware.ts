@@ -4,7 +4,7 @@
 // Tracked in MongoDB `daily_token_quotas` collection with UTC-day granularity.
 // Documents auto-expire after 2 days via TTL index.
 //
-// Quotas per plan:
+// Quotas per plan (matches DAILY_TOKEN_QUOTA in constants.ts):
 //   Free: 50,000 tokens / day
 //   Pro:  500,000 tokens / day
 

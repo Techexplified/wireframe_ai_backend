@@ -84,6 +84,10 @@ export async function refundCredits(
 //
 // Adds purchased topup credits to the topup_credits pool.
 // Safe to retry ONLY because webhook idempotency check already ran [③].
+//
+// Fix (Ghost User): NO upsert — user MUST pre-exist.
+// If user doesn't exist, we throw so the webhook handler can unmark idempotency
+// and allow Dodo to retry the webhook after the user is properly registered.
 
 export async function addTopUpCredits(
   figmaUserId: string,
@@ -92,16 +96,16 @@ export async function addTopUpCredits(
   const users = await getUsersCollection();
 
   const updated = await users.findOneAndUpdate(
-    { figmaUserId },
+    { figmaUserId }, // NO upsert — user must pre-exist
     { $inc: { topup_credits: creditsToAdd } },
-    {
-      upsert:         true, // safety: create user if somehow missing
-      returnDocument: 'after',
-    }
+    { returnDocument: 'after' }
   );
 
   if (!updated) {
-    throw new Error('addTopUpCredits: failed to update user');
+    console.error(
+      `[CreditService] addTopUpCredits ALERT: User '${figmaUserId}' not found — possible forged webhook or race condition. Aborting top-up.`
+    );
+    throw new Error(`addTopUpCredits: user '${figmaUserId}' not found — cannot add credits`);
   }
 
   return { topup_credits: updated.topup_credits };

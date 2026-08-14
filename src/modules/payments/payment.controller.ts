@@ -30,6 +30,11 @@ export async function initCheckoutHandler(
     throw new AppError('Payment provider not configured. Please contact support.', 500, 'configuration_error');
   }
 
+  if (!process.env.DODO_API_KEY) {
+    logger.error('[payment.controller] DODO_API_KEY is not set in environment');
+    throw new AppError('Payment provider not configured. Please contact support.', 500, 'configuration_error');
+  }
+
   try {
     const { checkoutUrl, checkoutId } = await createPlanCheckout(
       req.figmaUserId,
@@ -56,7 +61,7 @@ export async function topupCheckoutHandler(
 
   if (!isActive) {
     throw new ForbiddenError(
-      'An active Starter or Pro plan is required to purchase credit top-ups.',
+      'An active Pro plan is required to purchase credit top-ups.',
       'plan_required'
     );
   }

@@ -66,14 +66,21 @@ async function ensureIndexes(db: Db): Promise<void> {
     { unique: true, background: true }
   );
 
-  // 3. usage_logs.figmaUserId + timestamp — per-user usage queries & TTL
+  // usage_logs.figmaUserId + timestamp — per-user usage queries
   await db.collection('usage_logs').createIndex(
     { figmaUserId: 1, timestamp: -1 },
     { background: true }
   );
+  // usage_logs.timestamp — 180-day TTL auto-expiry
   await db.collection('usage_logs').createIndex(
-    { timestamp: -1 },
-    { background: true }
+    { timestamp: 1 },
+    { background: true, expireAfterSeconds: 180 * 24 * 60 * 60 }
+  );
+
+  // processed_webhooks.processedAt — 90-day TTL to prevent indefinite growth
+  await db.collection('processed_webhooks').createIndex(
+    { processedAt: 1 },
+    { background: true, expireAfterSeconds: 90 * 24 * 60 * 60 }
   );
 
   // 4. ai_requests_log — telemetry queries & 90-day TTL auto-expiry

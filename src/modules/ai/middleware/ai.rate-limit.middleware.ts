@@ -3,7 +3,7 @@
 // Sliding-window rate limiter for AI generation requests.
 // Stored in MongoDB `generation_rate_limits` with compound index + TTL.
 //
-// Limits per plan:
+// Limits per plan (matches RATE_LIMIT_CONFIG in constants.ts):
 //   Free: 1 request / 30 seconds
 //   Pro:  3 requests / 10 seconds
 

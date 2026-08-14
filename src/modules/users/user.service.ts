@@ -153,6 +153,10 @@ async function runOnceExpire(figmaUserId: string): Promise<UserWithId> {
 //   - topup_credits: KEPT unchanged
 //   - new pass starts NOW, full 30 days
 //   - plan credits reset to plan's allocation
+//
+// Fix (Ghost User): NO upsert — user MUST pre-exist.
+// If the user doesn't exist, we throw an alert-level error and abort.
+// This prevents forged/replayed webhooks from creating phantom Pro accounts.
 
 export async function activatePlan(figmaUserId: string, planId: PlanId): Promise<UserWithId> {
   const users  = await getUsersCollection();
@@ -164,7 +168,7 @@ export async function activatePlan(figmaUserId: string, planId: PlanId): Promise
   console.log(`[UserService] Activating plan '${planId}' for ${figmaUserId}`);
 
   const updated = await users.findOneAndUpdate(
-    { figmaUserId },
+    { figmaUserId }, // NO upsert — must pre-exist
     {
       $set: {
         plan:                    planId,
@@ -175,11 +179,15 @@ export async function activatePlan(figmaUserId: string, planId: PlanId): Promise
         updatedAt:               now,
       },
     },
-    { upsert: true, returnDocument: 'after' }
+    { returnDocument: 'after' }
   );
 
   if (!updated) {
-    throw new Error('activatePlan: failed to update user');
+    // Ghost user attempt: user doesn't exist in DB but webhook fired
+    console.error(
+      `[UserService] activatePlan ALERT: User '${figmaUserId}' not found — possible forged webhook or race condition. Aborting activation.`
+    );
+    throw new Error(`activatePlan: user '${figmaUserId}' not found — cannot activate plan`);
   }
 
   return updated;

@@ -1,4 +1,4 @@
-// ─── idempotency.ts — Webhook deduplication [③] ──────────────────────────────
+// ─── utils/idempotency.ts — Webhook deduplication [③] ──────────────────────────
 //
 // Fix ③: Prevents double-processing of Dodo webhooks.
 // Uses MongoDB unique index on eventId — duplicate insertOne throws E11000.
@@ -30,6 +30,16 @@ export async function markEventProcessed(eventId: string): Promise<boolean> {
     // Any other error is unexpected — re-throw to let the webhook handler 500
     throw err;
   }
+}
+
+/**
+ * Unmarks an event as processed.
+ * Called when business logic (activatePlan/addTopUpCredits) fails AFTER the
+ * idempotency record was committed, so Dodo can safely retry the webhook.
+ */
+export async function unmarkEventProcessed(eventId: string): Promise<void> {
+  const col = await getWebhooksCollection();
+  await col.deleteOne({ eventId });
 }
 
 // Type guard for MongoDB errors

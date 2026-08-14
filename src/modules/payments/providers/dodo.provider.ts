@@ -54,9 +54,9 @@ export async function createPlanCheckout(
     metadata: {
       figmaUserId,
       planId,
+      paymentType:            'subscription',  // canonical field (webhook reads this)
       existing_topup_credits: String(existingTopupCredits),
       existing_days_left:     String(existingDaysLeft),
-      payment_type:           'plan',
     },
   });
 
@@ -87,7 +87,7 @@ export async function createTopUpCheckout(
     metadata: {
       figmaUserId,
       packId,
-      payment_type: 'topup',
+      paymentType: 'topup',  // canonical field (webhook reads this)
     },
   });
 
@@ -105,14 +105,21 @@ export async function createTopUpCheckout(
 //
 // Dodo sends: Dodo-Signature: t=timestamp,v1=signature
 // We compute: HMAC-SHA256(secret, timestamp + "." + rawBody)
+//
+// IMPORTANT: If DODO_WEBHOOK_SECRET is not set, verification ALWAYS fails.
+// There is no dev bypass — use a real test webhook secret from Dodo dashboard.
 
 export function verifyWebhookSignature(
   rawBody: Buffer,
   signatureHeader: string
 ): boolean {
   if (!DODO_WEBHOOK_SEC) {
-    console.warn('[dodo.provider] DODO_WEBHOOK_SECRET not set — skipping verification in dev');
-    return process.env.NODE_ENV !== 'production';
+    // Do NOT silently bypass — fail closed. Empty secret = no verification possible.
+    console.error(
+      '[dodo.provider] DODO_WEBHOOK_SECRET is not set. All webhook requests will be rejected. ' +
+      'Set DODO_WEBHOOK_SECRET in your .env file.'
+    );
+    return false;
   }
 
   // Parse header: "t=1234567890,v1=abc123..."

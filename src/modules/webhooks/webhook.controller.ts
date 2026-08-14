@@ -1,8 +1,16 @@
 // ─── modules/webhooks/webhook.controller.ts — Webhook Handlers ────────────────
+//
+// Edge cases handled:
+//  ① Signature verification before ANY logic
+//  ② Idempotency via markEventProcessed (atomic unique insert)
+//  ③ On business logic failure after idempotency mark → unmark so Dodo can retry
+//  ④ paymentType normalized from both snake_case and camelCase metadata fields
+//  ⑤ Top-up allowed even if plan expired between checkout and webhook (with warning)
+//  ⑥ activatePlan / addTopUpCredits do NOT use upsert — user must pre-exist
 
 import { Request, Response } from 'express';
 import { verifyWebhookSignature } from '../payments/providers/dodo.provider';
-import { markEventProcessed } from '../../utils/idempotency';
+import { markEventProcessed, unmarkEventProcessed } from '../../utils/idempotency';
 import { activatePlan } from '../users/user.service';
 import { addTopUpCredits } from '../credits/credit.service';
 import { PlanId, TopUpPackId, TOPUP_PACKS } from '../../config/constants';
@@ -17,6 +25,7 @@ export async function dodoWebhookHandler(
   const signature = req.headers['x-dodo-signature'] as string | undefined;
   const rawBody   = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
 
+  // ① Signature MUST be verified first — reject tampered requests immediately
   if (!verifyWebhookSignature(rawBody, signature || '')) {
     logger.warn('[webhook.controller] Invalid webhook signature from IP:', req.ip);
     throw new UnauthorizedError('Invalid webhook signature', 'invalid_signature');
@@ -31,7 +40,7 @@ export async function dodoWebhookHandler(
     throw new BadRequestError('Missing event identifier', 'invalid_payload');
   }
 
-  // Idempotency check: atomic insert into processed_webhooks collection
+  // ② Idempotency check: atomic insert into processed_webhooks collection
   const isNewEvent = await markEventProcessed(eventId);
   if (!isNewEvent) {
     logger.info(`[webhook.controller] Duplicate event ${eventId} — skipping`);
@@ -47,10 +56,14 @@ export async function dodoWebhookHandler(
 
   const metadata    = (payload.data?.metadata || payload.metadata || {}) as Record<string, unknown>;
   const figmaUserId = metadata.figmaUserId as string | undefined;
-  const paymentType = metadata.paymentType as 'subscription' | 'topup' | undefined;
+
+  // ④ Normalize paymentType — Dodo may return either snake_case or camelCase
+  const paymentType = (metadata.paymentType || metadata.payment_type) as 'subscription' | 'topup' | undefined;
 
   if (!figmaUserId || !paymentType) {
     logger.error('[webhook.controller] Missing required metadata:', metadata);
+    // Unmark so Dodo can retry if this was a transient metadata issue
+    await unmarkEventProcessed(eventId);
     throw new BadRequestError('Missing figmaUserId or paymentType in metadata', 'invalid_metadata');
   }
 
@@ -74,7 +87,11 @@ export async function dodoWebhookHandler(
         subscription_ends_at: updatedUser.subscription_ends_at,
       });
     } catch (err) {
-      logger.error('[webhook.controller] activatePlan error:', err);
+      // ③ Critical: unmark idempotency so Dodo can retry successfully
+      logger.error('[webhook.controller] activatePlan error — unmarking event for retry:', err);
+      await unmarkEventProcessed(eventId).catch((e) =>
+        logger.error('[webhook.controller] Failed to unmark event:', e)
+      );
       throw new AppError('Subscription activation failed', 500, 'activation_failed');
     }
     return;
@@ -101,7 +118,11 @@ export async function dodoWebhookHandler(
         topup_credits: result.topup_credits,
       });
     } catch (err) {
-      logger.error('[webhook.controller] addTopUpCredits error:', err);
+      // ③ Critical: unmark idempotency so Dodo can retry successfully
+      logger.error('[webhook.controller] addTopUpCredits error — unmarking event for retry:', err);
+      await unmarkEventProcessed(eventId).catch((e) =>
+        logger.error('[webhook.controller] Failed to unmark event:', e)
+      );
       throw new AppError('Top-up credit addition failed', 500, 'topup_failed');
     }
     return;
