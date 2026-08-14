@@ -4,10 +4,9 @@
 // estimates the worst-case USD cost, and rejects if it exceeds the plan's
 // per-request cap. This runs BEFORE OpenRouter is touched.
 //
-// Per-request cost caps:
-//   Free:    $0.03
-//   Starter: $0.20
-//   Pro:     $0.45
+// Per-request cost caps (from PER_REQUEST_COST_CAP_USD in constants.ts):
+//   Free: $0.10
+//   Pro:  $0.80
 //
 // Also attaches `req._aiComplexity` for downstream reuse (avoids double-scoring).
 
@@ -18,6 +17,7 @@ import {
   PER_REQUEST_COST_CAP_USD,
   MODEL_MAP,
   DEFAULT_MODEL,
+  DEFAULT_MODEL_KEY,   // Fix C-03/M-01: use exported constant instead of hardcoding
 } from '../../../config/constants';
 import { AppError } from '../../../utils/errors';
 import { logger } from '../../../utils/logger';
@@ -45,9 +45,9 @@ export async function aiBudgetMiddleware(
     const device     = body.device ?? 'desktop';
     const complexity = scoreComplexity(body.prompt, device);
 
-    // Resolve which model will actually be used
-    const modelKey  = body.model ?? 'kimi-2-6';
-    const rawModel  = MODEL_MAP[modelKey] ?? (modelKey.includes('/') ? modelKey : DEFAULT_MODEL);
+    // Fix C-03: was 'kimi-2-6' (hardcoded); now uses DEFAULT_MODEL_KEY from constants.ts
+    const modelKey    = body.model ?? DEFAULT_MODEL_KEY;
+    const rawModel    = MODEL_MAP[modelKey] ?? (modelKey.includes('/') ? modelKey : DEFAULT_MODEL);
     const routedModel = resolveModel(rawModel, complexity.score, plan);
 
     // Estimate worst-case cost (prompt tokens + full token budget output)

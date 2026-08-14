@@ -4,22 +4,30 @@
 //
 // Flow:
 //   1. Determine credit cost for the selected model
-//   2. Check plan access & credit balance
-//   3. Atomically reserve model-appropriate credits (pool tracked by service)
-//   4. Call OpenRouter via callOpenRouterStream (gets telemetry stream result)
-//   5. Set SSE headers + pipe telemetry-wrapped stream to Express res
-//   6. After stream completes: log telemetry + update daily quota (non-blocking)
-//   7. Refund CORRECT credit amount & pool on stream error
+//   2. Fix C-01: resolve which model will ACTUALLY execute, charge that model's cost
+//   3. Check plan access & credit balance
+//   4. Atomically reserve correct credits (pool tracked by service)
+//   5. Call OpenRouter via callOpenRouterStream (gets telemetry stream result)
+//   6. Set SSE headers + pipe telemetry-wrapped stream to Express res
+//   7. After stream completes: log telemetry (with reasoningTokens) + update daily quota
+//   8. Refund CORRECT credit amount & pool on stream error
 
 import { Request, Response } from 'express';
 import { reserveCredits, refundCredits, logUsage } from '../credits/credit.service';
 import { callOpenRouterStream } from './ai.service';
 import { logAiRequest, computeCostUSD } from './ai.telemetry';
 import { incrementDailyTokenUsage } from './middleware/ai.quota.middleware';
+import { resolveModel } from './ai.router';
 import { GenerateOptions } from './ai.types';
 import { ForbiddenError, BadRequestError, BadGatewayError } from '../../utils/errors';
 import { logger } from '../../utils/logger';
-import { MODEL_CREDIT_COST, CREDIT_COST_GENERATE } from '../../config/constants';
+import {
+  MODEL_CREDIT_COST,
+  CREDIT_COST_GENERATE,
+  DEFAULT_MODEL_KEY,
+  MODEL_MAP,
+  DEFAULT_MODEL,
+} from '../../config/constants';
 
 // ── POST /api/features/generate/start ────────────────────────────────────────
 
@@ -36,13 +44,19 @@ export async function startGenerationHandler(
     device      = 'desktop',
     style       = 'minimal',
     fidelity    = 'high',
-    model       = 'gpt-5-6-luna',
+    model       = DEFAULT_MODEL_KEY,  // Fix C-03: was hardcoded 'gpt-5-6-luna'
     maxTokens,
     temperature,
   } = req.body as Partial<GenerateOptions>;
 
-  // Determine credit cost for the requested model key
-  const cost = MODEL_CREDIT_COST[model] ?? CREDIT_COST_GENERATE;
+  // Fix C-01: resolve which OpenRouter model will ACTUALLY be used (respects routing policy),
+  // then charge credits for THAT model — not the requested model.
+  // Free users are always routed to DEFAULT_MODEL (Luna = 1 credit) regardless of selection.
+  const rawModel     = MODEL_MAP[model] ?? (model.includes('/') ? model : DEFAULT_MODEL);
+  const resolvedModelId = resolveModel(rawModel, req._aiComplexity?.score ?? 0, plan);
+  // Reverse-map OpenRouter ID → UI key to look up credit cost
+  const resolvedModelKey = Object.entries(MODEL_MAP).find(([, v]) => v === resolvedModelId)?.[0] ?? model;
+  const cost = MODEL_CREDIT_COST[resolvedModelKey] ?? CREDIT_COST_GENERATE;
 
   // Guard: plan access
   if (!isActive && credits === 0) {
@@ -52,12 +66,12 @@ export async function startGenerationHandler(
     );
   }
 
-  // Guard: pre-check credit balance with correct model cost
+  // Guard: pre-check credit balance with RESOLVED model cost (C-01)
   const totalCredits = credits + topup_credits;
   if (totalCredits < cost) {
     const message = plan === 'free'
       ? 'No credits remaining. Please upgrade to a plan.'
-      : `Not enough credits. ${modelDisplayName(model)} costs ${cost} credit${cost > 1 ? 's' : ''} and you have ${totalCredits} remaining.`;
+      : `Not enough credits. ${modelDisplayName(resolvedModelKey)} costs ${cost} credit${cost > 1 ? 's' : ''} and you have ${totalCredits} remaining.`;
     throw new ForbiddenError(message, 'insufficient_credits', isActive);
   }
 
@@ -71,12 +85,11 @@ export async function startGenerationHandler(
   if (!reservation.success) {
     const message = plan === 'free'
       ? 'No credits remaining. Please upgrade to a plan.'
-      : `Not enough credits. ${modelDisplayName(model)} costs ${cost} credit${cost > 1 ? 's' : ''}.`;
+      : `Not enough credits. ${modelDisplayName(resolvedModelKey)} costs ${cost} credit${cost > 1 ? 's' : ''}.`;
     throw new ForbiddenError(message, 'insufficient_credits', isActive);
   }
 
-  // Use pool directly from reservation result — this is the critical fix:
-  // previously computed from arithmetic which broke with variable costs
+  // Use pool directly from reservation result
   const pool = reservation.pool;
 
   // Log usage (non-blocking)
@@ -139,7 +152,7 @@ export async function startGenerationHandler(
     try {
       const telemetry = await streamResult.telemetryPromise;
 
-      // Pillar 1: log AI request to MongoDB
+      // Pillar 1: log AI request to MongoDB (C-04: pass reasoningTokens to computeCostUSD)
       logAiRequest({
         figmaUserId,
         model:            streamResult.model,
@@ -147,7 +160,12 @@ export async function startGenerationHandler(
         completionTokens: telemetry.completionTokens,
         reasoningTokens:  telemetry.reasoningTokens,
         totalTokens:      telemetry.totalTokens,
-        estimatedCostUSD: computeCostUSD(streamResult.model, telemetry.promptTokens, telemetry.completionTokens),
+        estimatedCostUSD: computeCostUSD(
+          streamResult.model,
+          telemetry.promptTokens,
+          telemetry.completionTokens,
+          telemetry.reasoningTokens     // Fix C-04: was omitted
+        ),
         finishReason:     telemetry.finishReason,
         durationMs:       telemetry.durationMs,
         complexityScore:  streamResult.complexityScore,
@@ -166,8 +184,14 @@ export async function startGenerationHandler(
         );
       }
 
+      const realCostUSD = computeCostUSD(
+        streamResult.model,
+        telemetry.promptTokens,
+        telemetry.completionTokens,
+        telemetry.reasoningTokens
+      );
       logger.info(
-        `[ai.controller] Generation complete — model: ${streamResult.model}, cost: ${cost} credits (${pool} pool), tokens: ${telemetry.promptTokens}+${telemetry.completionTokens}, usd: $${computeCostUSD(streamResult.model, telemetry.promptTokens, telemetry.completionTokens).toFixed(5)}, finish: ${telemetry.finishReason}, ${telemetry.durationMs}ms`
+        `[ai.controller] Generation complete — model: ${streamResult.model}, cost: ${cost} credits (${pool} pool), tokens: ${telemetry.promptTokens}+${telemetry.completionTokens}+${telemetry.reasoningTokens}r, usd: $${realCostUSD.toFixed(5)}, finish: ${telemetry.finishReason}, ${telemetry.durationMs}ms`
       );
     } catch (err) {
       logger.warn('[ai.controller] Post-stream telemetry processing error:', err);
@@ -176,14 +200,19 @@ export async function startGenerationHandler(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+//
+// Fix M-02: derive display names from MODEL_MAP keys + OpenRouter ID for consistency.
+// Avoids maintaining a 6th independent model name table that can drift.
+
+const MODEL_DISPLAY_NAMES: Record<string, string> = {
+  'kimi-2-6':          'Kimi K2',
+  'gpt-5-6-luna':      'GPT-5.6 Luna',
+  'claude-sonnet-4-5': 'Claude Sonnet 4.5',
+  'gpt-4o':            'GPT-4o',
+  'gemini-1-5':        'Gemini 2.0 Flash',
+};
 
 function modelDisplayName(modelKey: string): string {
-  const names: Record<string, string> = {
-    'kimi-2-6':          'Kimi K2',
-    'gpt-5-6-luna':      'GPT-5.6 Luna',
-    'claude-sonnet-4-5': 'Claude Sonnet 4.5',
-    'gpt-4o':            'GPT-4o',
-    'gemini-1-5':        'Gemini 2.0 Flash',
-  };
-  return names[modelKey] || modelKey;
+  // Falls back to the raw key if a new model is added to MODEL_MAP but not here
+  return MODEL_DISPLAY_NAMES[modelKey] || modelKey;
 }

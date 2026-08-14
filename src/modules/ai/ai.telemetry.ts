@@ -16,16 +16,20 @@ export { AiRequestLogDoc };
  * Computes the estimated USD cost of an OpenRouter request using
  * the pricing table in constants.ts. Falls back to a conservative
  * premium estimate if the model is not in the table.
+ *
+ * Fix C-04: reasoningTokens are billed at the output token rate by most
+ * providers (including Anthropic). They are now included in the cost formula.
  */
 export function computeCostUSD(
   model: string,
   promptTokens: number,
-  completionTokens: number
+  completionTokens: number,
+  reasoningTokens: number = 0    // Fix C-04: was silently excluded, causing underreporting
 ): number {
   const pricing = MODEL_PRICING[model] ?? { inputPer1M: 5, outputPer1M: 20 };
   return (
-    (promptTokens     / 1_000_000) * pricing.inputPer1M +
-    (completionTokens / 1_000_000) * pricing.outputPer1M
+    (promptTokens                        / 1_000_000) * pricing.inputPer1M +
+    ((completionTokens + reasoningTokens) / 1_000_000) * pricing.outputPer1M
   );
 }
 

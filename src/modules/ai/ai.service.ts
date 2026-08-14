@@ -14,7 +14,7 @@ import { Transform } from 'stream';
 import { GenerateOptions, OpenRouterStreamResult, StreamTelemetry } from './ai.types';
 import { scoreComplexity } from './ai.complexity';
 import { resolveModel } from './ai.router';
-import { MODEL_MAP, DEFAULT_MODEL } from '../../config/constants';
+import { MODEL_MAP, DEFAULT_MODEL, DEFAULT_MODEL_KEY } from '../../config/constants';
 
 export { GenerateOptions };
 
@@ -356,7 +356,9 @@ function wrapWithTelemetry(
         promptTokens,
         completionTokens,
         reasoningTokens,
-        totalTokens:   totalTokens || promptTokens + completionTokens,
+        // Fix H-04: if OpenRouter omits the usage chunk, all token counters stay 0.
+        // Fall back to tokenBudget as a conservative ceiling so daily quota is always consumed.
+        totalTokens:   totalTokens || (promptTokens + completionTokens) || tokenBudget,
         finishReason,
         durationMs,
         model,
@@ -404,7 +406,8 @@ export function callOpenRouterStream(
       : complexity.tokenBudget;
 
     // ── Pillar 4: Model Routing ───────────────────────────────────────────────
-    const modelKey   = opts.model ?? 'kimi-2-6';
+    // Fix C-03: was hardcoded 'kimi-2-6'; now uses DEFAULT_MODEL_KEY from constants.ts
+    const modelKey   = opts.model ?? DEFAULT_MODEL_KEY;
     const rawModel   = MODEL_MAP[modelKey] ?? (modelKey.includes('/') ? modelKey : DEFAULT_MODEL);
     const modelName  = resolveModel(rawModel, complexity.score, plan);
 

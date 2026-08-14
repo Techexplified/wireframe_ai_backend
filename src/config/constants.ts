@@ -3,7 +3,13 @@
 // Single source of truth for all plan limits and pricing configuration.
 // Change values here, not scattered across routes.
 
-export const FREE_TRIAL_CREDITS = parseInt(process.env.FREE_TRIAL_CREDITS || '3', 10);
+// FREE_TRIAL_CREDITS — validated to prevent NaN / absurd values from a bad env.
+// If the env value is non-numeric or out of the safe range [0, 50], falls back to 3.
+const _rawTrialCredits = parseInt(process.env.FREE_TRIAL_CREDITS || '3', 10);
+export const FREE_TRIAL_CREDITS =
+  Number.isFinite(_rawTrialCredits) && _rawTrialCredits >= 0 && _rawTrialCredits <= 50
+    ? _rawTrialCredits
+    : 3;
 
 // ─── Plans ───────────────────────────────────────────────────────────────────
 // Only two plans: 'free' (trial) and 'pro' ($20/month, 100 credits).
@@ -112,7 +118,9 @@ export const RATE_LIMIT_CONFIG: Record<PlanId, { windowMs: number; maxRequests: 
 };
 
 // ─── Daily Token Quota ────────────────────────────────────────────────────────
-// Max total output tokens per user per UTC day (abuse prevention floor).
+// Max TOTAL tokens (input + output + reasoning) per user per UTC day.
+// Tracks full OpenRouter token consumption — not just output tokens — for
+// accurate cost-based abuse prevention.
 
 export const DAILY_TOKEN_QUOTA: Record<PlanId, number> = {
   free: 50_000,

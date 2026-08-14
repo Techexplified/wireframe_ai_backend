@@ -3,13 +3,14 @@
 // Selects the OpenRouter model based on plan tier and prompt complexity.
 //
 // Routing logic:
-//   Free plan  → always openai/gpt-5.6-luna (1 credit, great quality for trial)
+//   Free plan  → always DEFAULT_MODEL (openai/gpt-5.6-luna) — 1 credit, great quality for trial
 //   Pro plan   → user's selected model, no downgrade
 //              (complexity scoring only gates token budget, not model choice)
 
-import { MODEL_PRICING } from '../../config/constants';
+import { MODEL_PRICING, DEFAULT_MODEL } from '../../config/constants';
 
-const FREE_MODEL = 'openai/gpt-5.6-luna';
+// Fix C-02: was a hardcoded duplicate of DEFAULT_MODEL — now always in sync with constants.ts
+const FREE_MODEL = DEFAULT_MODEL;
 
 /**
  * Resolves the actual OpenRouter model to use.
@@ -23,7 +24,7 @@ export function resolveModel(
   complexityScore: number,
   plan: string
 ): string {
-  // Free plan: always route to Luna (trial experience stays consistent)
+  // Free plan: always route to DEFAULT_MODEL (trial experience stays consistent)
   if (plan === 'free') return FREE_MODEL;
 
   // Pro plan: always respect the user's model selection — they paid for it
@@ -50,5 +51,3 @@ export function estimateRequestCostUSD(
     (maxTokens    / 1_000_000) * pricing.outputPer1M
   );
 }
-
-
