@@ -3,16 +3,14 @@
 // All TypeScript interfaces that describe documents stored in MongoDB.
 // Kept separate from the connection logic so modules can import types
 // without importing (and thus executing) the MongoClient setup.
-//
-// NOTE: These interfaces live in config/ rather than modules/ to avoid
-//       circular imports (modules/ → config/database → modules/).
 
 // ─── Users collection ─────────────────────────────────────────────────────────
 
 export interface UserDoc {
   figmaUserId: string;
+  firebaseUid?: string;    // Fix AUTH-C-01: Firebase Anonymous UID bound on first auth
   name?: string;
-  plan: 'free' | 'pro'; // only two plans: free trial and pro
+  plan: 'free' | 'pro';
   credits: number;
   topup_credits: number;
   subscription_started_at: Date | null;
@@ -22,44 +20,56 @@ export interface UserDoc {
 }
 
 // ─── Processed webhooks collection ───────────────────────────────────────────
-// Stores eventId of every processed Dodo webhook for idempotency.
 
 export interface ProcessedWebhookDoc {
   eventId: string;
   processedAt: Date;
 }
 
+// ─── Credit Reservations collection ──────────────────────────────────────────
+// Fix CREDIT-C-01: Server-side record of each credit deduction.
+// Refund must reference the reservationId — client cannot inflate the amount.
+
+export interface CreditReservationDoc {
+  reservationId: string;    // UUID — sent to client as X-Reservation-Id header
+  figmaUserId:   string;
+  cost:          number;    // authoritative credit cost from server
+  pool:          'plan' | 'topup';
+  status:        'pending' | 'settled' | 'refunded';
+  reservedAt:    Date;
+  expiresAt:     Date;      // TTL: 10 minutes — auto-removed by MongoDB TTL index
+}
+
 // ─── Usage logs collection ────────────────────────────────────────────────────
-// Written after every successful generation. Non-blocking, non-critical.
 
 export interface UsageLogDoc {
-  figmaUserId: string;
-  action: string;
-  creditsUsed: number;
+  figmaUserId:    string;
+  action:         string;
+  creditsUsed:    number;
+  pool:           'plan' | 'topup';  // Fix CREDIT-H-01: which pool was deducted
+  reservationId?: string;            // Fix CREDIT-H-01: links to reservation record
   promptSnippet?: string;
-  timestamp: Date;
+  timestamp:      Date;
 }
 
 // ─── AI Telemetry collection (`ai_requests_log`) ─────────────────────────────
-// Stores full telemetry for every OpenRouter generation request.
 
 export interface AiRequestLogDoc {
-  figmaUserId: string;
-  model: string;
-  promptTokens: number;
+  figmaUserId:      string;
+  model:            string;
+  promptTokens:     number;
   completionTokens: number;
-  reasoningTokens: number;
-  totalTokens: number;
+  reasoningTokens:  number;
+  totalTokens:      number;
   estimatedCostUSD: number;
-  finishReason: string;
-  durationMs: number;
-  complexityScore: number;
-  tokenBudget: number;
-  timestamp: Date;
+  finishReason:     string;
+  durationMs:       number;
+  complexityScore:  number;
+  tokenBudget:      number;
+  timestamp:        Date;
 }
 
-// ─── Generation Rate Limits collection (`generation_rate_limits`) ───────────
-// Sliding-window rate limiter records per user request attempt.
+// ─── Generation Rate Limits collection (`generation_rate_limits`) ────────────
 
 export interface RateLimitDoc {
   figmaUserId: string;
@@ -67,11 +77,10 @@ export interface RateLimitDoc {
 }
 
 // ─── Daily Token Quotas collection (`daily_token_quotas`) ─────────────────────
-// Enforces max output token budget per user per UTC day.
 
 export interface DailyQuotaDoc {
   figmaUserId: string;
-  date: string;       // YYYY-MM-DD UTC
-  tokensUsed: number;
-  createdAt: Date;
+  date:        string;       // YYYY-MM-DD UTC
+  tokensUsed:  number;
+  createdAt:   Date;
 }

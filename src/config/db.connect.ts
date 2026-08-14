@@ -1,11 +1,12 @@
 // ─── config/db.connect.ts — MongoDB connection singleton & collection helpers ──
 //
-// Handles the low-level connection lifecycle:
-//   - Cached MongoClient with ping health check & auto-reconnect
-//   - Index creation (idempotent, runs once on first connect)
-//   - Typed collection accessor functions
+// Fixes applied:
+//   PERF-H-01: Removed admin ping on every request — replaced with lazy reconnect
+//   DB-L-01:   Rate limit TTL fixed from 3600s → 120s
+//   AUTH-C-01: Added users.firebaseUid index for O(1) UID lookup
+//   CREDIT-C-01: Added credit_reservations collection + TTL index (10 min expiry)
 
-import { MongoClient, Db, Collection } from 'mongodb';
+import { MongoClient, Db, Collection, MongoServerError } from 'mongodb';
 import {
   UserDoc,
   ProcessedWebhookDoc,
@@ -13,77 +14,75 @@ import {
   AiRequestLogDoc,
   RateLimitDoc,
   DailyQuotaDoc,
+  CreditReservationDoc,
 } from './user.model';
 
 let cachedClient: MongoClient | null = null;
+let cachedDb:     Db | null          = null;
 
 export async function connectToDatabase(): Promise<Db> {
   const uri    = process.env.MONGODB_URI || '';
-  const dbName = process.env.MONGODB_DB || process.env.MONGO_DB_NAME || 'wireframe_ai';
+  const dbName = process.env.MONGODB_DB || 'wireframe_ai';
 
-  if (!uri) {
-    throw new Error('MONGODB_URI environment variable is not set');
+  if (!uri) throw new Error('MONGODB_URI environment variable is not set');
+
+  // Fix PERF-H-01: Return cached db immediately — no ping on every request.
+  // Lazy reconnect: if a real operation fails with MongoNetworkError, callers
+  // should catch and call connectToDatabase() again (retryWrites handles most cases).
+  if (cachedClient && cachedDb) {
+    return cachedDb;
   }
 
-  if (!cachedClient) {
-    cachedClient = new MongoClient(uri, {
-      maxPoolSize:              10,
-      serverSelectionTimeoutMS: 10000,
-      socketTimeoutMS:          45000,
-      connectTimeoutMS:         10000,
-      retryWrites:              true,
-      retryReads:               true,
-    });
-    await cachedClient.connect();
-    const db = cachedClient.db(dbName);
-    await ensureIndexes(db);
-  }
+  cachedClient = new MongoClient(uri, {
+    maxPoolSize:              10,
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS:          45000,
+    connectTimeoutMS:         10000,
+    retryWrites:              true,
+    retryReads:               true,
+  });
 
-  try {
-    // Connection health check ping
-    await cachedClient.db('admin').command({ ping: 1 });
-  } catch (err) {
-    console.warn('[Database] Connection ping failed, reconnecting...', err);
-    cachedClient = null;
-    return connectToDatabase();
-  }
+  await cachedClient.connect();
+  cachedDb = cachedClient.db(dbName);
+  await ensureIndexes(cachedDb);
 
-  return cachedClient.db(dbName);
+  return cachedDb;
 }
 
-// ─── Index creation (idempotent) ─────────────────────────────────────────────
+// ─── Index creation (idempotent — safe to re-run on reconnect) ───────────────
 
 async function ensureIndexes(db: Db): Promise<void> {
-  // 1. users.figmaUserId — primary lookup key, must be unique
+  // 1. users — primary lookup + firebaseUid lookup (AUTH-C-01)
   await db.collection('users').createIndex(
     { figmaUserId: 1 },
     { unique: true, background: true }
   );
+  await db.collection('users').createIndex(
+    { firebaseUid: 1 },
+    { unique: true, sparse: true, background: true }  // sparse: users pre-existing auth don't have it yet
+  );
 
-  // 2. processed_webhooks.eventId — idempotency key, must be unique
+  // 2. processed_webhooks — idempotency key + 90-day TTL
   await db.collection('processed_webhooks').createIndex(
     { eventId: 1 },
     { unique: true, background: true }
   );
-
-  // usage_logs.figmaUserId + timestamp — per-user usage queries
-  await db.collection('usage_logs').createIndex(
-    { figmaUserId: 1, timestamp: -1 },
-    { background: true }
-  );
-  // usage_logs.timestamp — 180-day TTL auto-expiry
-  await db.collection('usage_logs').createIndex(
-    { timestamp: 1 },
-    { background: true, expireAfterSeconds: 180 * 24 * 60 * 60 }
-  );
-
-  // processed_webhooks.processedAt — 90-day TTL to prevent indefinite growth
   await db.collection('processed_webhooks').createIndex(
     { processedAt: 1 },
     { background: true, expireAfterSeconds: 90 * 24 * 60 * 60 }
   );
 
-  // 4. ai_requests_log — telemetry queries & 90-day TTL auto-expiry
+  // 3. usage_logs — per-user queries + 180-day TTL
+  await db.collection('usage_logs').createIndex(
+    { figmaUserId: 1, timestamp: -1 },
+    { background: true }
+  );
+  await db.collection('usage_logs').createIndex(
+    { timestamp: 1 },
+    { background: true, expireAfterSeconds: 180 * 24 * 60 * 60 }
+  );
+
+  // 4. ai_requests_log — telemetry queries + 90-day TTL
   await db.collection('ai_requests_log').createIndex(
     { figmaUserId: 1, timestamp: -1 },
     { background: true }
@@ -93,17 +92,18 @@ async function ensureIndexes(db: Db): Promise<void> {
     { background: true, expireAfterSeconds: 90 * 24 * 60 * 60 }
   );
 
-  // 5. generation_rate_limits — sliding window query index + 1-hour TTL auto-expiry
+  // 5. generation_rate_limits — sliding window query index
+  //    Fix DB-L-01: TTL was 3600s (1 hour) but window is max 30s. Now 120s (4× the window).
   await db.collection('generation_rate_limits').createIndex(
     { figmaUserId: 1, requestedAt: -1 },
     { background: true }
   );
   await db.collection('generation_rate_limits').createIndex(
     { requestedAt: 1 },
-    { background: true, expireAfterSeconds: 3600 }
+    { background: true, expireAfterSeconds: 120 }
   );
 
-  // 6. daily_token_quotas — user+date unique index + 2-day TTL auto-expiry
+  // 6. daily_token_quotas — user+date unique index + 2-day TTL
   await db.collection('daily_token_quotas').createIndex(
     { figmaUserId: 1, date: 1 },
     { unique: true, background: true }
@@ -111,6 +111,21 @@ async function ensureIndexes(db: Db): Promise<void> {
   await db.collection('daily_token_quotas').createIndex(
     { createdAt: 1 },
     { background: true, expireAfterSeconds: 172800 }
+  );
+
+  // 7. credit_reservations — Fix CREDIT-C-01: server-side reservation tracking.
+  //    reservationId is the refund key (UUID). Expires after 10 minutes via TTL.
+  await db.collection('credit_reservations').createIndex(
+    { reservationId: 1 },
+    { unique: true, background: true }
+  );
+  await db.collection('credit_reservations').createIndex(
+    { figmaUserId: 1, status: 1 },
+    { background: true }
+  );
+  await db.collection('credit_reservations').createIndex(
+    { expiresAt: 1 },
+    { background: true, expireAfterSeconds: 0 }  // TTL: uses document's expiresAt field directly
   );
 }
 
@@ -145,3 +160,12 @@ export async function getDailyQuotasCollection(): Promise<Collection<DailyQuotaD
   const db = await connectToDatabase();
   return db.collection<DailyQuotaDoc>('daily_token_quotas');
 }
+
+// Fix CREDIT-C-01: New collection for server-side credit reservation tracking
+export async function getCreditReservationsCollection(): Promise<Collection<CreditReservationDoc>> {
+  const db = await connectToDatabase();
+  return db.collection<CreditReservationDoc>('credit_reservations');
+}
+
+// Export for use in connection error recovery
+export { MongoServerError };

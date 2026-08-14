@@ -300,7 +300,8 @@ function wrapWithTelemetry(
   startTime: number,
   model: string,
   complexityScore: number,
-  tokenBudget: number
+  tokenBudget: number,
+  cancelStream?: () => void
 ): OpenRouterStreamResult {
   let promptTokens     = 0;
   let completionTokens = 0;
@@ -373,7 +374,7 @@ function wrapWithTelemetry(
   source.pipe(transform);
   source.on('error', (err) => transform.destroy(err));
 
-  return { stream: transform, telemetryPromise, model, complexityScore, tokenBudget };
+  return { stream: transform, telemetryPromise, model, complexityScore, tokenBudget, cancelStream };
 }
 
 // ─── callOpenRouterStream ─────────────────────────────────────────────────────
@@ -435,6 +436,7 @@ export function callOpenRouterStream(
       port:     443,
       path:     '/api/v1/chat/completions',
       method:   'POST',
+      timeout:  120_000,
       headers: {
         'Authorization':  `Bearer ${apiKey}`,
         'HTTP-Referer':   'https://wireframe-ai.figma.plugin',
@@ -455,9 +457,21 @@ export function callOpenRouterStream(
         return;
       }
 
-      // ── Pillar 1: Wrap stream with telemetry passthrough ──────────────────
-      const result = wrapWithTelemetry(res, startTime, modelName, complexity.score, tokenBudget);
+      // ── Pillar 1: Wrap stream with telemetry passthrough & cancelStream ─────
+      const cancelStream = () => {
+        try {
+          req.destroy();
+          res.destroy();
+        } catch { /* ignore */ }
+      };
+
+      const result = wrapWithTelemetry(res, startTime, modelName, complexity.score, tokenBudget, cancelStream);
       resolve(result);
+    });
+
+    // Fix AI-H-02: Timeout handler
+    req.on('timeout', () => {
+      req.destroy(new Error('OpenRouter request timed out after 120s'));
     });
 
     req.on('error', (err: Error) => {

@@ -7,6 +7,7 @@ import { WithId } from 'mongodb';
 import { getUsersCollection } from '../../config/database';
 import { FREE_TRIAL_CREDITS, PLAN_CONFIG, PlanId } from '../../config/constants';
 import { PlanState, UserDoc } from './user.types';
+import { logger } from '../../utils/logger';
 
 export { PlanState, UserDoc };
 
@@ -28,7 +29,7 @@ export async function getActivePlanState(figmaUserId: string, name?: string): Pr
 
   let user: UserWithId | null = await users.findOne({ figmaUserId });
 
-  // New user: create with free plan + trial credits + username  [⑧]
+  // New user: create with free plan + trial credits + username [⑧]
   if (!user) {
     user = await findOrCreate(figmaUserId, name);
   } else if (name && user.name !== name) {
@@ -41,7 +42,7 @@ export async function getActivePlanState(figmaUserId: string, name?: string): Pr
     if (updated) user = updated;
   }
 
-  // Expiry check: if plan is not free and subscription has ended  [①②]
+  // Expiry check: if plan is not free and subscription has ended [①②]
   const now = new Date();
   if (
     user.plan !== 'free' &&
@@ -114,16 +115,16 @@ export async function findOrCreate(figmaUserId: string, name?: string): Promise<
   return result;
 }
 
-// ─── runOnceExpire — one-way door  ①② ─────────────────────────────────────────
+// ─── runOnceExpire — one-way door ①② ─────────────────────────────────────────
 //
-// Wipes plan, credits, and topup_credits.
+// Wipes plan, credits, and topup_credits (per user policy decision).
 // Called from getActivePlanState when subscription_ends_at < now.
 // Safe to call multiple times (idempotent).
 
 async function runOnceExpire(figmaUserId: string): Promise<UserWithId> {
   const users = await getUsersCollection();
 
-  console.log(`[UserService] Expiring pass for ${figmaUserId}`);
+  logger.info(`[user.service] Expiring pass for ${figmaUserId}`);
 
   const updated = await users.findOneAndUpdate(
     { figmaUserId },
@@ -148,15 +149,13 @@ async function runOnceExpire(figmaUserId: string): Promise<UserWithId> {
 
 // ─── activatePlan — called by webhook on payment.succeeded ───────────────────
 //
-// Fix ⑦: Mid-cycle upgrade rule:
+// Mid-cycle upgrade rule:
 //   - days_left forfeited (not prorated — one-time pass model)
 //   - topup_credits: KEPT unchanged
 //   - new pass starts NOW, full 30 days
 //   - plan credits reset to plan's allocation
 //
-// Fix (Ghost User): NO upsert — user MUST pre-exist.
-// If the user doesn't exist, we throw an alert-level error and abort.
-// This prevents forged/replayed webhooks from creating phantom Pro accounts.
+// Ghost User guard: NO upsert — user MUST pre-exist.
 
 export async function activatePlan(figmaUserId: string, planId: PlanId): Promise<UserWithId> {
   const users  = await getUsersCollection();
@@ -165,7 +164,7 @@ export async function activatePlan(figmaUserId: string, planId: PlanId): Promise
   const endsAt = new Date(now);
   endsAt.setDate(endsAt.getDate() + config.durationDays);
 
-  console.log(`[UserService] Activating plan '${planId}' for ${figmaUserId}`);
+  logger.info(`[user.service] Activating plan '${planId}' for ${figmaUserId}`);
 
   const updated = await users.findOneAndUpdate(
     { figmaUserId }, // NO upsert — must pre-exist
@@ -173,7 +172,6 @@ export async function activatePlan(figmaUserId: string, planId: PlanId): Promise
       $set: {
         plan:                    planId,
         credits:                 config.credits,
-        // topup_credits intentionally NOT touched — kept as-is  [⑦]
         subscription_started_at: now,
         subscription_ends_at:    endsAt,
         updatedAt:               now,
@@ -183,9 +181,8 @@ export async function activatePlan(figmaUserId: string, planId: PlanId): Promise
   );
 
   if (!updated) {
-    // Ghost user attempt: user doesn't exist in DB but webhook fired
-    console.error(
-      `[UserService] activatePlan ALERT: User '${figmaUserId}' not found — possible forged webhook or race condition. Aborting activation.`
+    logger.error(
+      `[user.service] activatePlan ALERT: User '${figmaUserId}' not found — possible forged webhook or race condition. Aborting activation.`
     );
     throw new Error(`activatePlan: user '${figmaUserId}' not found — cannot activate plan`);
   }
@@ -193,7 +190,7 @@ export async function activatePlan(figmaUserId: string, planId: PlanId): Promise
   return updated;
 }
 
-// ─── expirePass — public alias (e.g. for admin/test tools) ───────────────────
+// ─── expirePass — public alias (e.g. for refund revocation / test tools) ─────
 
 export async function expirePass(figmaUserId: string): Promise<UserWithId> {
   return runOnceExpire(figmaUserId);

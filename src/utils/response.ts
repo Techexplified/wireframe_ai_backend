@@ -24,6 +24,8 @@ export function sendError(res: Response, error: unknown): void {
   res.status(500).json({
     error: 'internal_server_error',
     message: 'An unexpected error occurred.',
-    details: process.env.NODE_ENV !== 'production' ? errMsg : undefined,
+    // Fix API-M-01: Only expose error details in explicit dev mode.
+    // NODE_ENV defaults to 'production' in index.ts, so this is safe.
+    details: process.env.NODE_ENV === 'development' ? errMsg : undefined,
   });
 }

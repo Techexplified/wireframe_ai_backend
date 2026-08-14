@@ -10,7 +10,6 @@ import * as crypto from 'crypto';
 import { PlanId, TopUpPackId, PLAN_CONFIG, TOPUP_PACKS } from '../../../config/constants';
 
 const DODO_API_KEY     = process.env.DODO_API_KEY     || '';
-const DODO_WEBHOOK_SEC = process.env.DODO_WEBHOOK_SECRET || '';
 const APP_BASE_URL     = process.env.APP_BASE_URL     || '';
 
 const dodoClient = axios.create({
@@ -113,11 +112,10 @@ export function verifyWebhookSignature(
   rawBody: Buffer,
   signatureHeader: string
 ): boolean {
-  if (!DODO_WEBHOOK_SEC) {
-    // Do NOT silently bypass — fail closed. Empty secret = no verification possible.
+  const secret = process.env.DODO_WEBHOOK_SECRET;
+  if (!secret) {
     console.error(
-      '[dodo.provider] DODO_WEBHOOK_SECRET is not set. All webhook requests will be rejected. ' +
-      'Set DODO_WEBHOOK_SECRET in your .env file.'
+      '[dodo.provider] DODO_WEBHOOK_SECRET is not set. All webhook requests will be rejected. '
     );
     return false;
   }
@@ -134,13 +132,24 @@ export function verifyWebhookSignature(
 
   if (!timestamp || !receivedSig) return false;
 
+  // Fix PAY-C-01: Validate timestamp to prevent replay attacks.
+  // Reject webhooks with timestamps older than 5 minutes.
+  const REPLAY_WINDOW_SECONDS = 300;
+  const webhookTime = parseInt(timestamp, 10);
+  const nowSeconds  = Math.floor(Date.now() / 1000);
+  if (isNaN(webhookTime) || Math.abs(nowSeconds - webhookTime) > REPLAY_WINDOW_SECONDS) {
+    console.warn(
+      `[dodo.provider] Webhook timestamp rejected — age: ${nowSeconds - webhookTime}s (max: ${REPLAY_WINDOW_SECONDS}s)`
+    );
+    return false;
+  }
+
   const signedPayload = `${timestamp}.${rawBody.toString('utf8')}`;
   const expectedSig   = crypto
-    .createHmac('sha256', DODO_WEBHOOK_SEC)
+    .createHmac('sha256', secret)
     .update(signedPayload)
     .digest('hex');
 
-  // Use timingSafeEqual to prevent timing attacks
   try {
     return crypto.timingSafeEqual(
       Buffer.from(receivedSig, 'hex'),

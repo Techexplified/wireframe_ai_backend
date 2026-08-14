@@ -1,93 +1,140 @@
 // ─── modules/credits/credit.service.ts — Atomic credit operations ─────────────
 //
-// All credit mutations use MongoDB findOneAndUpdate with a query-side
-// condition ({credits: {$gte: cost}}) so the check-and-deduct is one atomic
-// operation. This prevents double-spend in concurrent requests.
+// Fixes applied:
+//   CREDIT-C-01: reserveCredits now writes a CreditReservationDoc — the server
+//                stores the exact cost and pool. Refunds require the reservationId
+//                and look up the amount — clients cannot inflate the refund.
+//   CREDIT-M-02: refundCredits now uses findOneAndUpdate + checks matchedCount
+//   CREDIT-H-01: logUsage now records pool + reservationId for ledger integrity
+//   CREDIT-M-01: addTopUpCredits enforces a MAX_TOPUP_CREDITS ceiling (10,000)
 
-import { getUsersCollection, getUsageLogsCollection } from '../../config/database';
+import { getUsersCollection, getUsageLogsCollection, getCreditReservationsCollection } from '../../config/database';
 import { CreditReservationResult } from './credit.types';
+import { logger } from '../../utils/logger';
+import crypto from 'crypto';
 
-// ─── reserveCredits — Trigger B credit deduction ④ ───────────────────────────
-//
-// Tries plan credits first. If insufficient, falls back to topup_credits pool.
-// Returns { success, creditsLeft, topup_creditsLeft }.
-// Uses MongoDB atomic findOneAndUpdate so concurrent requests race safely.
+// Fix CREDIT-M-01: cap topup_credits at 10,000 to prevent overflow and unexpected platform cost
+const MAX_TOPUP_CREDITS = 10_000;
+
+// Reservation TTL — 10 minutes from creation (MongoDB TTL index uses expiresAt field)
+const RESERVATION_TTL_MS = 10 * 60 * 1000;
+
+// ─── reserveCredits — Atomic credit deduction with server-side reservation ────
 
 export async function reserveCredits(
   figmaUserId: string,
   cost: number = 1
 ): Promise<CreditReservationResult> {
   const users = await getUsersCollection();
+  const reservations = await getCreditReservationsCollection();
 
   // ── Attempt 1: deduct from plan credits pool ──────────────────────────────
   const deductPlan = await users.findOneAndUpdate(
-    {
-      figmaUserId,
-      credits: { $gte: cost }, // atomic condition: must have enough credits
-    },
+    { figmaUserId, credits: { $gte: cost } },
     { $inc: { credits: -cost } },
     { returnDocument: 'after' }
   );
 
   if (deductPlan) {
+    const reservationId = crypto.randomUUID();
+    const now = new Date();
+    await reservations.insertOne({
+      reservationId,
+      figmaUserId,
+      cost,
+      pool:      'plan',
+      status:    'pending',
+      reservedAt: now,
+      expiresAt:  new Date(now.getTime() + RESERVATION_TTL_MS),
+    });
     return {
       success:           true,
       creditsLeft:       deductPlan.credits,
       topup_creditsLeft: deductPlan.topup_credits,
-      pool:              'plan',  // ← track which pool was used
+      pool:              'plan',
+      reservationId,
     };
   }
 
   // ── Attempt 2: fall back to topup_credits pool ────────────────────────────
   const deductTopup = await users.findOneAndUpdate(
-    {
-      figmaUserId,
-      topup_credits: { $gte: cost }, // atomic condition on topup pool
-    },
+    { figmaUserId, topup_credits: { $gte: cost } },
     { $inc: { topup_credits: -cost } },
     { returnDocument: 'after' }
   );
 
   if (deductTopup) {
+    const reservationId = crypto.randomUUID();
+    const now = new Date();
+    await reservations.insertOne({
+      reservationId,
+      figmaUserId,
+      cost,
+      pool:      'topup',
+      status:    'pending',
+      reservedAt: now,
+      expiresAt:  new Date(now.getTime() + RESERVATION_TTL_MS),
+    });
     return {
       success:           true,
       creditsLeft:       deductTopup.credits,
       topup_creditsLeft: deductTopup.topup_credits,
-      pool:              'topup',  // ← track which pool was used
+      pool:              'topup',
+      reservationId,
     };
   }
 
-  // ── Neither pool had enough credits ───────────────────────────────────────
-  return { success: false, creditsLeft: 0, topup_creditsLeft: 0, pool: 'plan' };
+  return { success: false, creditsLeft: 0, topup_creditsLeft: 0, pool: 'plan', reservationId: '' };
 }
 
-// ─── refundCredits — called if generation fails after deduction ④ ─────────────
+// ─── refundCredits — Fix CREDIT-C-01: refund amount comes from the reservation ──
 //
-// Determines which pool was deducted and refunds to the same pool.
-// Simple $inc +cost — safe because this is called only after a confirmed deduct.
+// The client provides only the reservationId. The server looks up the exact cost
+// and pool from the reservation document. Clients cannot inflate the refund.
 
 export async function refundCredits(
   figmaUserId: string,
-  pool: 'plan' | 'topup',
-  cost: number = 1
+  reservationId: string
 ): Promise<void> {
-  const users = await getUsersCollection();
-  const field = pool === 'plan' ? 'credits' : 'topup_credits';
+  const users        = await getUsersCollection();
+  const reservations = await getCreditReservationsCollection();
 
-  await users.updateOne(
+  // Look up the reservation — must belong to this user and be in 'pending' state
+  const reservation = await reservations.findOne({ reservationId, figmaUserId, status: 'pending' });
+  if (!reservation) {
+    // Already refunded, settled, expired, or belongs to a different user — safe no-op
+    logger.warn(`[credit.service] refundCredits: reservation ${reservationId} not found or already processed for user ${figmaUserId}`);
+    return;
+  }
+
+  const field = reservation.pool === 'plan' ? 'credits' : 'topup_credits';
+
+  // Fix CREDIT-M-02: Use findOneAndUpdate (not updateOne) so we confirm the document existed
+  const updated = await users.findOneAndUpdate(
     { figmaUserId },
-    { $inc: { [field]: cost } }
+    { $inc: { [field]: reservation.cost } },
+    { returnDocument: 'after' }
   );
+
+  if (!updated) {
+    logger.error(`[credit.service] refundCredits: user ${figmaUserId} not found during refund of reservation ${reservationId}`);
+    return;
+  }
+
+  // Mark reservation as refunded — prevents double-refund
+  await reservations.updateOne({ reservationId }, { $set: { status: 'refunded' } });
+  logger.info(`[credit.service] Refunded ${reservation.cost} credits (${reservation.pool} pool) to ${figmaUserId} via reservation ${reservationId}`);
+}
+
+// ─── settleReservation — called after successful generation ────────────────────
+// Marks the reservation as settled so it can't be refunded after the fact.
+
+export async function settleReservation(reservationId: string): Promise<void> {
+  const reservations = await getCreditReservationsCollection();
+  await reservations.updateOne({ reservationId }, { $set: { status: 'settled' } });
 }
 
 // ─── addTopUpCredits — called by webhook on topup payment.succeeded ───────────
-//
-// Adds purchased topup credits to the topup_credits pool.
-// Safe to retry ONLY because webhook idempotency check already ran [③].
-//
-// Fix (Ghost User): NO upsert — user MUST pre-exist.
-// If user doesn't exist, we throw so the webhook handler can unmark idempotency
-// and allow Dodo to retry the webhook after the user is properly registered.
 
 export async function addTopUpCredits(
   figmaUserId: string,
@@ -95,16 +142,30 @@ export async function addTopUpCredits(
 ): Promise<{ topup_credits: number }> {
   const users = await getUsersCollection();
 
+  // Fix CREDIT-M-01: Reject if balance would exceed the ceiling
+  const user = await users.findOne({ figmaUserId });
+  if (!user) {
+    logger.error(`[credit.service] addTopUpCredits: User '${figmaUserId}' not found`);
+    throw new Error(`addTopUpCredits: user '${figmaUserId}' not found — cannot add credits`);
+  }
+
+  if (user.topup_credits + creditsToAdd > MAX_TOPUP_CREDITS) {
+    const allowed = Math.max(0, MAX_TOPUP_CREDITS - user.topup_credits);
+    logger.warn(`[credit.service] addTopUpCredits: capping topup_credits at ${MAX_TOPUP_CREDITS} for ${figmaUserId} (requested +${creditsToAdd}, allowed +${allowed})`);
+    creditsToAdd = allowed;
+  }
+
+  if (creditsToAdd === 0) {
+    return { topup_credits: user.topup_credits };
+  }
+
   const updated = await users.findOneAndUpdate(
-    { figmaUserId }, // NO upsert — user must pre-exist
+    { figmaUserId },
     { $inc: { topup_credits: creditsToAdd } },
     { returnDocument: 'after' }
   );
 
   if (!updated) {
-    console.error(
-      `[CreditService] addTopUpCredits ALERT: User '${figmaUserId}' not found — possible forged webhook or race condition. Aborting top-up.`
-    );
     throw new Error(`addTopUpCredits: user '${figmaUserId}' not found — cannot add credits`);
   }
 
@@ -112,14 +173,14 @@ export async function addTopUpCredits(
 }
 
 // ─── logUsage — write to usage_logs collection ───────────────────────────────
-//
-// Called after a successful generation. Non-blocking — errors here don't
-// affect the user response.
+// Fix CREDIT-H-01: Now records pool + reservationId for full ledger traceability.
 
 export async function logUsage(
-  figmaUserId: string,
-  action: string,
-  creditsUsed: number,
+  figmaUserId:   string,
+  action:        string,
+  creditsUsed:   number,
+  pool:          'plan' | 'topup',
+  reservationId: string,
   promptSnippet?: string
 ): Promise<void> {
   try {
@@ -128,11 +189,12 @@ export async function logUsage(
       figmaUserId,
       action,
       creditsUsed,
+      pool,
+      reservationId,
       promptSnippet: promptSnippet?.slice(0, 80),
-      timestamp: new Date(),
+      timestamp:     new Date(),
     });
   } catch (err) {
-    // Log errors are non-fatal — generation already succeeded
-    console.warn('[creditService] logUsage failed:', err);
+    logger.warn('[credit.service] logUsage failed:', err);
   }
 }

@@ -1,11 +1,4 @@
-// ─── config/database.ts — Re-export barrel (backwards compatibility) ───────────
-//
-// database.ts re-exports from two focused files:
-//   - db.connect.ts  : MongoDB connection singleton + collection helpers
-//   - user.model.ts  : Document interfaces (UserDoc, ProcessedWebhookDoc, etc.)
-//
-// This file re-exports everything from both so existing imports continue to
-// work without any changes.
+// ─── config/database.ts — Re-export barrel ─────────────────────────────────────
 
 export {
   connectToDatabase,
@@ -15,6 +8,7 @@ export {
   getAiRequestsLogCollection,
   getRateLimitsCollection,
   getDailyQuotasCollection,
+  getCreditReservationsCollection,  // Fix CREDIT-C-01: new reservation collection
 } from './db.connect';
 
 export type {
@@ -24,4 +18,5 @@ export type {
   AiRequestLogDoc,
   RateLimitDoc,
   DailyQuotaDoc,
+  CreditReservationDoc,             // Fix CREDIT-C-01: new type
 } from './user.model';

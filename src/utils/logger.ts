@@ -1,17 +1,27 @@
-// ─── utils/logger.ts — Production Structured Logger ──────────────────────────
+// ─── utils/logger.ts — Production Structured Logger with requestId ─────────────
+//
+// Fix OBS-H-01: Every log line now carries the requestId from AsyncLocalStorage
+// so a single request's full lifecycle (auth → credit → OpenRouter → telemetry)
+// can be found with one log query:  requestId: "abc-123"
+
+import { AsyncLocalStorage } from 'async_hooks';
+
+// Shared store — set once per request in index.ts middleware
+export const requestIdStore = new AsyncLocalStorage<string>();
 
 export enum LogLevel {
   DEBUG = 'DEBUG',
-  INFO = 'INFO',
-  WARN = 'WARN',
+  INFO  = 'INFO',
+  WARN  = 'WARN',
   ERROR = 'ERROR',
 }
 
 class Logger {
   private formatLog(level: LogLevel, message: string, meta?: unknown): string {
-    const timestamp = new Date().toISOString();
-    const metaString = meta ? ` | Meta: ${JSON.stringify(meta)}` : '';
-    return `[${timestamp}] [${level}] ${message}${metaString}`;
+    const timestamp  = new Date().toISOString();
+    const requestId  = requestIdStore.getStore() ?? '-';
+    const metaString = meta ? ` | ${JSON.stringify(meta)}` : '';
+    return `[${timestamp}] [${level}] [req:${requestId}] ${message}${metaString}`;
   }
 
   debug(message: string, meta?: unknown): void {

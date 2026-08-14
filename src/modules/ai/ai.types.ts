@@ -51,4 +51,6 @@ export interface OpenRouterStreamResult {
   model: string;
   complexityScore: number;
   tokenBudget: number;
+  /** Fix AI-H-03: Aborts the active upstream OpenRouter request if client disconnects */
+  cancelStream?: () => void;
 }
