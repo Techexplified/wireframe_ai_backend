@@ -4,26 +4,11 @@
 // Logs: model, exact token counts, estimated USD cost, finish_reason, duration,
 // and complexity score. Used for cost analysis and optimization iteration.
 
-import { connectToDatabase } from '../../config/database';
+import { getAiRequestsLogCollection, AiRequestLogDoc } from '../../config/database';
 import { MODEL_PRICING } from '../../config/constants';
 import { logger } from '../../utils/logger';
 
-// ─── Document Interface ───────────────────────────────────────────────────────
-
-export interface AiRequestLogDoc {
-  figmaUserId: string;
-  model: string;
-  promptTokens: number;
-  completionTokens: number;
-  reasoningTokens: number;
-  totalTokens: number;
-  estimatedCostUSD: number;
-  finishReason: string;
-  durationMs: number;
-  complexityScore: number;
-  tokenBudget: number;
-  timestamp: Date;
-}
+export { AiRequestLogDoc };
 
 // ─── Cost Calculator ──────────────────────────────────────────────────────────
 
@@ -52,28 +37,9 @@ export function computeCostUSD(
  */
 export async function logAiRequest(doc: AiRequestLogDoc): Promise<void> {
   try {
-    const db = await connectToDatabase();
-    await db.collection<AiRequestLogDoc>('ai_requests_log').insertOne(doc);
+    const col = await getAiRequestsLogCollection();
+    await col.insertOne(doc);
   } catch (err) {
     logger.warn('[ai.telemetry] Failed to log AI request:', err);
   }
-}
-
-// ─── Index Bootstrap ──────────────────────────────────────────────────────────
-
-/**
- * Creates indexes on ai_requests_log.
- * Called once from database.ts ensureIndexes().
- */
-export async function ensureAiRequestLogIndexes(db: import('mongodb').Db): Promise<void> {
-  // Per-user query index
-  await db.collection('ai_requests_log').createIndex(
-    { figmaUserId: 1, timestamp: -1 },
-    { background: true }
-  );
-  // Global time-series query index + 90-day TTL auto-expiry
-  await db.collection('ai_requests_log').createIndex(
-    { timestamp: -1 },
-    { background: true, expireAfterSeconds: 90 * 24 * 60 * 60 }
-  );
 }

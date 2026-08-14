@@ -39,3 +39,39 @@ export interface UsageLogDoc {
   promptSnippet?: string;
   timestamp: Date;
 }
+
+// ─── AI Telemetry collection (`ai_requests_log`) ─────────────────────────────
+// Stores full telemetry for every OpenRouter generation request.
+
+export interface AiRequestLogDoc {
+  figmaUserId: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  estimatedCostUSD: number;
+  finishReason: string;
+  durationMs: number;
+  complexityScore: number;
+  tokenBudget: number;
+  timestamp: Date;
+}
+
+// ─── Generation Rate Limits collection (`generation_rate_limits`) ───────────
+// Sliding-window rate limiter records per user request attempt.
+
+export interface RateLimitDoc {
+  figmaUserId: string;
+  requestedAt: Date;
+}
+
+// ─── Daily Token Quotas collection (`daily_token_quotas`) ─────────────────────
+// Enforces max output token budget per user per UTC day.
+
+export interface DailyQuotaDoc {
+  figmaUserId: string;
+  date: string;       // YYYY-MM-DD UTC
+  tokensUsed: number;
+  createdAt: Date;
+}

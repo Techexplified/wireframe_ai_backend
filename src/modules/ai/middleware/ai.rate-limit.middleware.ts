@@ -1,23 +1,17 @@
 // ─── modules/ai/middleware/ai.rate-limit.middleware.ts ────────────────────────
 //
 // Sliding-window rate limiter for AI generation requests.
-// Stored in MongoDB — no Redis dependency needed at current scale.
+// Stored in MongoDB `generation_rate_limits` with compound index + TTL.
 //
 // Limits per plan:
-//   Free:    1 request / 30 seconds
-//   Starter: 1 request / 10 seconds
-//   Pro:     3 requests / 10 seconds
+//   Free: 1 request / 30 seconds
+//   Pro:  3 requests / 10 seconds
 
 import { Request, Response, NextFunction } from 'express';
-import { connectToDatabase } from '../../../config/database';
+import { getRateLimitsCollection } from '../../../config/database';
 import { RATE_LIMIT_CONFIG } from '../../../config/constants';
 import { AppError } from '../../../utils/errors';
 import { logger } from '../../../utils/logger';
-
-interface RateLimitDoc {
-  figmaUserId: string;
-  requestedAt: Date;
-}
 
 export async function aiRateLimitMiddleware(
   req: Request,
@@ -31,10 +25,9 @@ export async function aiRateLimitMiddleware(
   const windowStart = new Date(now.getTime() - config.windowMs);
 
   try {
-    const db  = await connectToDatabase();
-    const col = db.collection<RateLimitDoc>('generation_rate_limits');
+    const col = await getRateLimitsCollection();
 
-    // Count how many requests this user made in the current window
+    // Count requests in window (uses compound index { figmaUserId: 1, requestedAt: -1 })
     const recentCount = await col.countDocuments({
       figmaUserId,
       requestedAt: { $gte: windowStart },

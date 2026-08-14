@@ -5,22 +5,16 @@
 // Documents auto-expire after 2 days via TTL index.
 //
 // Quotas per plan:
-//   Free:    15,000 tokens / day
-//   Starter: 150,000 tokens / day
-//   Pro:     500,000 tokens / day
+//   Free: 50,000 tokens / day
+//   Pro:  500,000 tokens / day
 
 import { Request, Response, NextFunction } from 'express';
-import { connectToDatabase } from '../../../config/database';
+import { getDailyQuotasCollection, DailyQuotaDoc } from '../../../config/database';
 import { DAILY_TOKEN_QUOTA } from '../../../config/constants';
 import { AppError } from '../../../utils/errors';
 import { logger } from '../../../utils/logger';
 
-interface DailyQuotaDoc {
-  figmaUserId: string;
-  date: string;       // YYYY-MM-DD UTC
-  tokensUsed: number;
-  createdAt: Date;
-}
+export { DailyQuotaDoc };
 
 function getTodayUTC(): string {
   return new Date().toISOString().slice(0, 10);
@@ -37,9 +31,7 @@ export async function aiQuotaMiddleware(
   const today       = getTodayUTC();
 
   try {
-    const db  = await connectToDatabase();
-    const col = db.collection<DailyQuotaDoc>('daily_token_quotas');
-
+    const col = await getDailyQuotasCollection();
     const doc = await col.findOne({ figmaUserId, date: today });
 
     if (doc && doc.tokensUsed >= quota) {
@@ -66,8 +58,7 @@ export async function incrementDailyTokenUsage(
   tokensUsed: number
 ): Promise<void> {
   try {
-    const db    = await connectToDatabase();
-    const col   = db.collection<DailyQuotaDoc>('daily_token_quotas');
+    const col   = await getDailyQuotasCollection();
     const today = getTodayUTC();
 
     await col.findOneAndUpdate(
