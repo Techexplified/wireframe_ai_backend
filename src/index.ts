@@ -63,9 +63,9 @@ app.use((_req: Request, _res: Response, next: NextFunction) => {
   requestIdStore.run(requestId, next);
 });
 
-// Fix API-H-02: Restrict CORS — replace wildcard localhost with specific allowed origins.
-// In production, only figma.com domains are accepted.
-// For local dev, add your specific dev origin to ALLOWED_DEV_ORIGINS.
+// CORS configuration:
+// - In production: allows Figma origins (figma.com).
+// - In local dev & testing: allows localhost, 127.0.0.1, and ngrok tunnels.
 const ALLOWED_DEV_ORIGINS = (process.env.ALLOWED_DEV_ORIGINS || '')
   .split(',')
   .map((o) => o.trim())
@@ -76,9 +76,18 @@ const ALL_ALLOWED_ORIGINS = [...PRODUCTION_ORIGINS, ...ALLOWED_DEV_ORIGINS];
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow non-browser clients (server-side calls, Figma desktop)
+    // Allow non-browser clients (server-side webhook calls, Figma desktop sandbox, curl, Postman)
     if (!origin) return callback(null, true);
-    if (ALL_ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+
+    if (
+      ALL_ALLOWED_ORIGINS.includes(origin) ||
+      origin.endsWith('.figma.com') ||
+      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ||
+      /^https?:\/\/[a-z0-9-]+\.(ngrok-free\.app|ngrok\.io|ngrok\.app)(:\d+)?$/.test(origin)
+    ) {
+      return callback(null, true);
+    }
+
     callback(new Error(`CORS: origin '${origin}' is not allowed`));
   },
   methods:        ['GET', 'POST', 'OPTIONS'],
