@@ -75,6 +75,8 @@ export async function getActivePlanState(figmaUserId: string, name?: string): Pr
     topup_credits:         user.topup_credits,
     days_left:             daysLeft,
     subscription_ends_at:  endsAt,
+    subscription_cancelled: user.subscription_cancelled ?? false,
+    dodo_subscription_id:  user.dodo_subscription_id ?? null,
   };
 
   return { user, planState };
@@ -98,6 +100,8 @@ export async function findOrCreate(figmaUserId: string, name?: string): Promise<
         topup_credits:           0,
         subscription_started_at: null,
         subscription_ends_at:    null,
+        dodo_subscription_id:    null,
+        subscription_cancelled:  false,
         createdAt:               now,
       },
       $set: {
@@ -135,6 +139,7 @@ async function runOnceExpire(figmaUserId: string): Promise<UserWithId> {
         topup_credits:           0,
         subscription_ends_at:    null,
         subscription_started_at: null,
+        subscription_cancelled:  false,
       },
     },
     { returnDocument: 'after' }
@@ -157,25 +162,36 @@ async function runOnceExpire(figmaUserId: string): Promise<UserWithId> {
 //
 // Ghost User guard: NO upsert — user MUST pre-exist.
 
-export async function activatePlan(figmaUserId: string, planId: PlanId): Promise<UserWithId> {
+export async function activatePlan(
+  figmaUserId: string,
+  planId: PlanId,
+  dodoSubscriptionId: string | null = null
+): Promise<UserWithId> {
   const users  = await getUsersCollection();
   const config = PLAN_CONFIG[planId];
   const now    = new Date();
   const endsAt = new Date(now);
   endsAt.setDate(endsAt.getDate() + config.durationDays);
 
-  logger.info(`[user.service] Activating plan '${planId}' for ${figmaUserId}`);
+  logger.info(`[user.service] Activating plan '${planId}' for ${figmaUserId}${dodoSubscriptionId ? ` (sub: ${dodoSubscriptionId})` : ''}`);
+
+  const updateFields: Record<string, unknown> = {
+    plan:                    planId,
+    credits:                 config.credits,
+    subscription_started_at: now,
+    subscription_ends_at:    endsAt,
+    subscription_cancelled:  false,
+    updatedAt:               now,
+  };
+
+  if (dodoSubscriptionId) {
+    updateFields.dodo_subscription_id = dodoSubscriptionId;
+  }
 
   const updated = await users.findOneAndUpdate(
     { figmaUserId }, // NO upsert — must pre-exist
     {
-      $set: {
-        plan:                    planId,
-        credits:                 config.credits,
-        subscription_started_at: now,
-        subscription_ends_at:    endsAt,
-        updatedAt:               now,
-      },
+      $set: updateFields,
     },
     { returnDocument: 'after' }
   );

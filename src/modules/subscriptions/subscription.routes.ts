@@ -5,7 +5,11 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { authMiddleware } from '../../middleware/auth.middleware';
-import { getSubscriptionStatusHandler } from './subscription.controller';
+import {
+  getSubscriptionStatusHandler,
+  cancelSubscriptionHandler,
+  reactivateSubscriptionHandler,
+} from './subscription.controller';
 
 const router = Router();
 
@@ -14,6 +18,22 @@ router.get(
   authMiddleware,
   (req: Request, res: Response, next: NextFunction) => {
     getSubscriptionStatusHandler(req, res).catch(next);
+  }
+);
+
+router.post(
+  '/cancel',
+  authMiddleware,
+  (req: Request, res: Response, next: NextFunction) => {
+    cancelSubscriptionHandler(req, res).catch(next);
+  }
+);
+
+router.post(
+  '/reactivate',
+  authMiddleware,
+  (req: Request, res: Response, next: NextFunction) => {
+    reactivateSubscriptionHandler(req, res).catch(next);
   }
 );
 

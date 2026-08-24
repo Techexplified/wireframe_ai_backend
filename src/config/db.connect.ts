@@ -44,88 +44,134 @@ export async function connectToDatabase(): Promise<Db> {
 
   await cachedClient.connect();
   cachedDb = cachedClient.db(dbName);
-  await ensureIndexes(cachedDb);
+
+  // Fix PERF-H-02: Run index creation non-blockingly in background
+  // to avoid adding 1.2s of latency to the first user request.
+  ensureIndexes(cachedDb).catch((err) => {
+    console.warn('[db.connect] Background index creation notice:', err?.message || err);
+  });
 
   return cachedDb;
 }
 
-// ─── Index creation (idempotent — safe to re-run on reconnect) ───────────────
+async function safeCreateIndex(
+  collection: Collection<any>,
+  keys: any,
+  options?: any
+): Promise<void> {
+  try {
+    await collection.createIndex(keys, options);
+  } catch (err: any) {
+    // If index already exists with different options, ignore or log warning
+    if (err?.code === 85 || err?.codeName === 'IndexOptionsConflict') {
+      console.warn(`[db] Index on ${collection.collectionName} exists with different options, skipping`);
+    } else {
+      console.warn(`[db] createIndex warning on ${collection.collectionName}:`, err?.message || err);
+    }
+  }
+}
 
 async function ensureIndexes(db: Db): Promise<void> {
   // 1. users — primary lookup + firebaseUid lookup (AUTH-C-01)
-  await db.collection('users').createIndex(
+  await safeCreateIndex(
+    db.collection('users'),
     { figmaUserId: 1 },
     { unique: true, background: true }
   );
-  await db.collection('users').createIndex(
+
+  // If a legacy non-sparse firebaseUid index exists, drop it so sparse index can be created
+  try {
+    const userIndexes = await db.collection('users').indexes();
+    const fbIndex = userIndexes.find(i => i.name === 'firebaseUid_1' || (i.key && i.key.firebaseUid));
+    if (fbIndex && !fbIndex.sparse && fbIndex.name) {
+      console.log('[db] Dropping non-sparse firebaseUid_1 index');
+      await db.collection('users').dropIndex(fbIndex.name);
+    }
+  } catch (err: any) {
+    console.warn('[db] Drop index warning:', err?.message || err);
+  }
+
+  await safeCreateIndex(
+    db.collection('users'),
     { firebaseUid: 1 },
-    { unique: true, sparse: true, background: true }  // sparse: users pre-existing auth don't have it yet
+    { unique: true, sparse: true, background: true }
   );
 
   // 2. processed_webhooks — idempotency key + 90-day TTL
-  await db.collection('processed_webhooks').createIndex(
+  await safeCreateIndex(
+    db.collection('processed_webhooks'),
     { eventId: 1 },
     { unique: true, background: true }
   );
-  await db.collection('processed_webhooks').createIndex(
+  await safeCreateIndex(
+    db.collection('processed_webhooks'),
     { processedAt: 1 },
     { background: true, expireAfterSeconds: 90 * 24 * 60 * 60 }
   );
 
   // 3. usage_logs — per-user queries + 180-day TTL
-  await db.collection('usage_logs').createIndex(
+  await safeCreateIndex(
+    db.collection('usage_logs'),
     { figmaUserId: 1, timestamp: -1 },
     { background: true }
   );
-  await db.collection('usage_logs').createIndex(
+  await safeCreateIndex(
+    db.collection('usage_logs'),
     { timestamp: 1 },
     { background: true, expireAfterSeconds: 180 * 24 * 60 * 60 }
   );
 
   // 4. ai_requests_log — telemetry queries + 90-day TTL
-  await db.collection('ai_requests_log').createIndex(
+  await safeCreateIndex(
+    db.collection('ai_requests_log'),
     { figmaUserId: 1, timestamp: -1 },
     { background: true }
   );
-  await db.collection('ai_requests_log').createIndex(
+  await safeCreateIndex(
+    db.collection('ai_requests_log'),
     { timestamp: -1 },
     { background: true, expireAfterSeconds: 90 * 24 * 60 * 60 }
   );
 
   // 5. generation_rate_limits — sliding window query index
-  //    Fix DB-L-01: TTL was 3600s (1 hour) but window is max 30s. Now 120s (4× the window).
-  await db.collection('generation_rate_limits').createIndex(
+  await safeCreateIndex(
+    db.collection('generation_rate_limits'),
     { figmaUserId: 1, requestedAt: -1 },
     { background: true }
   );
-  await db.collection('generation_rate_limits').createIndex(
+  await safeCreateIndex(
+    db.collection('generation_rate_limits'),
     { requestedAt: 1 },
     { background: true, expireAfterSeconds: 120 }
   );
 
   // 6. daily_token_quotas — user+date unique index + 2-day TTL
-  await db.collection('daily_token_quotas').createIndex(
+  await safeCreateIndex(
+    db.collection('daily_token_quotas'),
     { figmaUserId: 1, date: 1 },
     { unique: true, background: true }
   );
-  await db.collection('daily_token_quotas').createIndex(
+  await safeCreateIndex(
+    db.collection('daily_token_quotas'),
     { createdAt: 1 },
     { background: true, expireAfterSeconds: 172800 }
   );
 
-  // 7. credit_reservations — Fix CREDIT-C-01: server-side reservation tracking.
-  //    reservationId is the refund key (UUID). Expires after 10 minutes via TTL.
-  await db.collection('credit_reservations').createIndex(
+  // 7. credit_reservations
+  await safeCreateIndex(
+    db.collection('credit_reservations'),
     { reservationId: 1 },
     { unique: true, background: true }
   );
-  await db.collection('credit_reservations').createIndex(
+  await safeCreateIndex(
+    db.collection('credit_reservations'),
     { figmaUserId: 1, status: 1 },
     { background: true }
   );
-  await db.collection('credit_reservations').createIndex(
+  await safeCreateIndex(
+    db.collection('credit_reservations'),
     { expiresAt: 1 },
-    { background: true, expireAfterSeconds: 0 }  // TTL: uses document's expiresAt field directly
+    { background: true, expireAfterSeconds: 0 }
   );
 }
 

@@ -14,4 +14,6 @@ export interface PlanState {
   topup_credits: number;
   days_left: number;
   subscription_ends_at: Date | null;
+  subscription_cancelled?: boolean;
+  dodo_subscription_id?: string | null;
 }

@@ -6,18 +6,18 @@ import { resolveModel } from '../modules/ai/ai.router';
 
 describe('Credit Cost & Model Routing Invariants', () => {
   it('free plan users are always routed to DEFAULT_MODEL (1 credit)', () => {
-    // Even if free user requested claude-sonnet-4-5 (5 credits)
-    const claudeRaw = MODEL_MAP['claude-sonnet-4-5'];
-    const routedModel = resolveModel(claudeRaw, 5, 'free');
+    // Even if free user requested gpt-4o (4 credits)
+    const rawModel = MODEL_MAP['gpt-4o'];
+    const routedModel = resolveModel(rawModel, 4, 'free');
 
     assert.strictEqual(routedModel, DEFAULT_MODEL, 'Free user must be routed to DEFAULT_MODEL');
   });
 
   it('pro plan users retain requested model without downgrade', () => {
-    const claudeRaw = MODEL_MAP['claude-sonnet-4-5'];
-    const routedModel = resolveModel(claudeRaw, 5, 'pro');
+    const rawModel = MODEL_MAP['deepseek-v4-pro'];
+    const routedModel = resolveModel(rawModel, 1, 'pro');
 
-    assert.strictEqual(routedModel, claudeRaw, 'Pro user must keep their selected premium model');
+    assert.strictEqual(routedModel, rawModel, 'Pro user must keep their selected premium model');
   });
 
   it('all model keys in MODEL_MAP have corresponding credit costs', () => {

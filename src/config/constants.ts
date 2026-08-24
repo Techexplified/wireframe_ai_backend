@@ -45,17 +45,17 @@ export const TOPUP_PACKS: Record<TopUpPackId, {
 }> = {
   small: {
     credits: 20,
-    priceLabel: '$4.99',
+    priceLabel: '$5',
     priceId: process.env.DODO_PRODUCT_TOPUP_SMALL || '',
   },
   medium: {
     credits: 50,
-    priceLabel: '$9.99',
+    priceLabel: '$10',
     priceId: process.env.DODO_PRODUCT_TOPUP_MEDIUM || '',
   },
   large: {
     credits: 100,
-    priceLabel: '$19.99',
+    priceLabel: '$20',
     priceId: process.env.DODO_PRODUCT_TOPUP_LARGE || '',
   },
 };
@@ -64,35 +64,35 @@ export const TOPUP_PACKS: Record<TopUpPackId, {
 // Default credit cost for generation (fallback when model key is unknown).
 export const CREDIT_COST_GENERATE = 1;
 
-// ─── Model Credit Cost Table ──────────────────────────────────────────────────
-// Credits deducted per generation based on the selected model (UI key).
-// Must stay in sync with MODEL_MAP keys below.
+// ─── AI Model Credit Cost Table ───────────────────────────────────────────────
 //
-//   kimi-2-6          → 2 credits (less powerful, but costs more credits — incentivises Luna)
+// Credit deduction per generation:
+//
 //   gpt-5-6-luna      → 1 credit  (default / recommended)
-//   claude-sonnet-4-5 → 5 credits (premium model)
+//   deepseek-v4-pro   → 1 credit  (ultra-fast & intelligent)
+//   gemini-3-7        → 1 credit  (Google Gemini 3.7 Flash)
+//   kimi-2-6          → 2 credits
 //   gpt-4o            → 4 credits
-//   gemini-1-5        → 2 credits
 //
 // Free users are always routed to gpt-5.6-luna (1 credit/gen) regardless of selection.
 
 export const MODEL_CREDIT_COST: Record<string, number> = {
-  'kimi-2-6':          2,
   'gpt-5-6-luna':      1,
-  'claude-sonnet-4-5': 5,
+  'deepseek-v4-pro':   1,
+  'gemini-3-7':        1,
+  'kimi-2-6':          2,
   'gpt-4o':            4,
-  'gemini-1-5':        2,
 };
 
 // ─── AI Model Map ─────────────────────────────────────────────────────────────
 // Maps user-facing model keys to OpenRouter model identifiers.
 
 export const MODEL_MAP: Record<string, string> = {
-  'kimi-2-6':          'moonshotai/kimi-k2:free',
   'gpt-5-6-luna':      'openai/gpt-5.6-luna',
-  'claude-sonnet-4-5': 'anthropic/claude-sonnet-4-5',
+  'deepseek-v4-pro':   'deepseek/deepseek-v4-pro',
+  'gemini-3-7':        'google/gemini-3.7-flash',
+  'kimi-2-6':          'moonshotai/kimi-k2:free',
   'gpt-4o':            'openai/gpt-4o',
-  'gemini-1-5':        'google/gemini-2.0-flash-001',
 };
 export const DEFAULT_MODEL = 'openai/gpt-5.6-luna';
 export const DEFAULT_MODEL_KEY = 'gpt-5-6-luna';
@@ -103,10 +103,10 @@ export const DEFAULT_MODEL_KEY = 'gpt-5-6-luna';
 
 export const MODEL_PRICING: Record<string, { inputPer1M: number; outputPer1M: number }> = {
   'moonshotai/kimi-k2:free':       { inputPer1M: 0,    outputPer1M: 0     },
-  'google/gemini-2.0-flash-001':   { inputPer1M: 0.10, outputPer1M: 0.40  },
+  'google/gemini-3.7-flash':       { inputPer1M: 0.10, outputPer1M: 0.40  },
   'openai/gpt-5.6-luna':           { inputPer1M: 0.10, outputPer1M: 0.60  },
+  'deepseek/deepseek-v4-pro':      { inputPer1M: 0.44, outputPer1M: 0.87  },
   'openai/gpt-4o':                 { inputPer1M: 2.50, outputPer1M: 10.00 },
-  'anthropic/claude-sonnet-4-5':   { inputPer1M: 3.00, outputPer1M: 15.00 },
 };
 
 // ─── AI Rate Limit Config ─────────────────────────────────────────────────────

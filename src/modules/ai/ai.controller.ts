@@ -219,11 +219,11 @@ export async function startGenerationHandler(
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const MODEL_DISPLAY_NAMES: Record<string, string> = {
-  'kimi-2-6':          'Kimi K2',
   'gpt-5-6-luna':      'GPT-5.6 Luna',
-  'claude-sonnet-4-5': 'Claude Sonnet 4.5',
+  'deepseek-v4-pro':   'DeepSeek V4 Pro',
+  'gemini-3-7':        'Gemini 3.7 Flash',
+  'kimi-2-6':          'Kimi K2',
   'gpt-4o':            'GPT-4o',
-  'gemini-1-5':        'Gemini 2.0 Flash',
 };
 
 function modelDisplayName(modelKey: string): string {

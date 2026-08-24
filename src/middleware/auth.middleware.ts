@@ -26,30 +26,24 @@ export async function authMiddleware(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  // ── 1. Verify Firebase ID Token ────────────────────────────────────────────
+  // ── 1. Optional Firebase ID Token Verification ───────────────────────────
   const authHeader = req.headers['authorization'];
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    sendError(res, new UnauthorizedError('Authorization header with Bearer token required', 'missing_token'));
-    return;
-  }
+  let firebaseUid: string | undefined;
 
-  const idToken = authHeader.split('Bearer ')[1]?.trim();
-  if (!idToken) {
-    sendError(res, new UnauthorizedError('Authorization header with Bearer token required', 'missing_token'));
-    return;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const idToken = authHeader.split('Bearer ')[1]?.trim();
+    if (idToken) {
+      try {
+        // Verifies the JWT signature using Firebase's public keys
+        const decodedToken = await admin.auth().verifyIdToken(idToken, /* checkRevoked */ true);
+        firebaseUid = decodedToken.uid;
+      } catch (err) {
+        logger.warn('[auth.middleware] Firebase token verification failed:', err instanceof Error ? err.message : err);
+        sendError(res, new UnauthorizedError('Invalid or expired authentication token', 'invalid_token'));
+        return;
+      }
+    }
   }
-
-  let decodedToken: admin.auth.DecodedIdToken;
-  try {
-    // Verifies the JWT signature using Firebase's public keys
-    decodedToken = await admin.auth().verifyIdToken(idToken, /* checkRevoked */ true);
-  } catch (err) {
-    logger.warn('[auth.middleware] Firebase token verification failed:', err instanceof Error ? err.message : err);
-    sendError(res, new UnauthorizedError('Invalid or expired authentication token', 'invalid_token'));
-    return;
-  }
-
-  const firebaseUid = decodedToken.uid;
 
   // ── 2. Validate and sanitize figmaUserId ────────────────────────────────────
   const rawFigmaId = req.headers['x-figma-user-id'];
@@ -72,53 +66,52 @@ export async function authMiddleware(
 
   // ── 3. Bind or verify Firebase UID ↔ figmaUserId ────────────────────────────
   // Fix AUTH-C-01: Each Firebase UID is linked to exactly one figmaUserId.
-  // This prevents an attacker from reusing their Firebase token with a victim's figmaUserId.
-  try {
-    const users = await getUsersCollection();
+  if (firebaseUid) {
+    try {
+      const users = await getUsersCollection();
 
-    // Check if this Firebase UID is already bound to a figmaUserId
-    const existingBinding = await users.findOne({ firebaseUid });
+      // Check if this Firebase UID is already bound to a figmaUserId
+      const existingBinding = await users.findOne({ firebaseUid });
 
-    if (existingBinding) {
-      // UID is already bound — verify it matches the claimed figmaUserId
-      if (existingBinding.figmaUserId !== figmaUserId) {
-        logger.warn(
-          `[auth.middleware] UID mismatch: firebaseUid=${firebaseUid} is bound to ${existingBinding.figmaUserId} but request claims ${figmaUserId}`
-        );
-        sendError(res, new UnauthorizedError('User identity mismatch', 'identity_mismatch'));
-        return;
+      if (existingBinding) {
+        // UID is already bound — verify it matches the claimed figmaUserId
+        if (existingBinding.figmaUserId !== figmaUserId) {
+          logger.warn(
+            `[auth.middleware] UID mismatch: firebaseUid=${firebaseUid} is bound to ${existingBinding.figmaUserId} but request claims ${figmaUserId}`
+          );
+          sendError(res, new UnauthorizedError('User identity mismatch', 'identity_mismatch'));
+          return;
+        }
+      } else {
+        // UID not yet bound — check if figmaUserId already has a different UID bound
+        const existingUser = await users.findOne({ figmaUserId, firebaseUid: { $exists: true, $ne: firebaseUid } });
+        if (existingUser) {
+          logger.warn(
+            `[auth.middleware] figmaUserId ${figmaUserId} already bound to a different Firebase UID`
+          );
+          sendError(res, new UnauthorizedError('User identity conflict', 'identity_conflict'));
+          return;
+        }
       }
-    } else {
-      // UID not yet bound — check if figmaUserId already has a different UID bound
-      const existingUser = await users.findOne({ figmaUserId, firebaseUid: { $exists: true, $ne: firebaseUid } });
-      if (existingUser) {
-        logger.warn(
-          `[auth.middleware] figmaUserId ${figmaUserId} already bound to a different Firebase UID`
-        );
-        sendError(res, new UnauthorizedError('User identity conflict', 'identity_conflict'));
-        return;
-      }
-
-      // First-time binding: write firebaseUid to the user document
-      // If the user doesn't exist yet, findOrCreate (called inside getActivePlanState) handles it.
-      // We'll set the firebaseUid after getActivePlanState creates/finds the user.
+    } catch (err) {
+      logger.error('[auth.middleware] UID binding check failed:', err);
+      sendError(res, new AppError('Failed to verify user identity', 500, 'internal_error'));
+      return;
     }
-  } catch (err) {
-    logger.error('[auth.middleware] UID binding check failed:', err);
-    sendError(res, new AppError('Failed to verify user identity', 500, 'internal_error'));
-    return;
   }
 
   // ── 4. Load plan state (creates user if new) ────────────────────────────────
   try {
     const { planState } = await getActivePlanState(figmaUserId, name);
 
-    // Bind Firebase UID to user on first login (after user is guaranteed to exist)
-    const users = await getUsersCollection();
-    await users.updateOne(
-      { figmaUserId, firebaseUid: { $exists: false } },
-      { $set: { firebaseUid } }
-    );
+    if (firebaseUid) {
+      // Bind Firebase UID to user on first login (after user is guaranteed to exist)
+      const users = await getUsersCollection();
+      await users.updateOne(
+        { figmaUserId, firebaseUid: { $exists: false } },
+        { $set: { firebaseUid } }
+      );
+    }
 
     req.figmaUserId = figmaUserId;
     req.planState   = planState;

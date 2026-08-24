@@ -10,6 +10,7 @@ import { verifyWebhookSignature } from '../payments/providers/dodo.provider';
 import { markEventProcessed, unmarkEventProcessed } from '../../utils/idempotency';
 import { activatePlan, expirePass } from '../users/user.service';
 import { addTopUpCredits } from '../credits/credit.service';
+import { getUsersCollection } from '../../config/database';
 import { PlanId, TopUpPackId, TOPUP_PACKS } from '../../config/constants';
 import { BadRequestError, UnauthorizedError, AppError } from '../../utils/errors';
 import { sendSuccess } from '../../utils/response';
@@ -19,11 +20,18 @@ export async function dodoWebhookHandler(
   req: Request & { rawBody?: Buffer },
   res: Response
 ): Promise<void> {
-  const signature = req.headers['x-dodo-signature'] as string | undefined;
+  const signature = (
+    req.headers['webhook-signature'] ||
+    req.headers['x-dodo-signature'] ||
+    req.headers['dodo-signature']
+  ) as string | undefined;
+
+  const msgId = (req.headers['webhook-id'] || req.headers['x-webhook-id']) as string | undefined;
+  const timestamp = (req.headers['webhook-timestamp'] || req.headers['x-webhook-timestamp']) as string | undefined;
   const rawBody   = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
 
-  // ① Signature + timestamp MUST be verified first (PAY-C-01: timestamp check is now inside verifyWebhookSignature)
-  if (!verifyWebhookSignature(rawBody, signature || '')) {
+  // ① Signature + timestamp MUST be verified first (supports Svix standard and legacy)
+  if (!verifyWebhookSignature(rawBody, signature || '', { msgId, timestamp })) {
     logger.warn('[webhook.controller] Invalid webhook signature from IP:', req.ip);
     throw new UnauthorizedError('Invalid webhook signature', 'invalid_signature');
   }
@@ -31,10 +39,8 @@ export async function dodoWebhookHandler(
   const payload   = req.body;
   const eventType = (payload.type || payload.event) as string | undefined;
 
-  // Fix PAY-M-01: Use canonical payment_id as the idempotency key.
-  // data.payment_id is the most stable and unique identifier across Dodo webhook formats.
-  // Fall back to event_id only if data.payment_id is absent (older API versions).
-  const eventId = (payload.data?.payment_id || payload.event_id || payload.id) as string | undefined;
+  // Fix PAY-M-01: Use canonical payment_id or subscription_id as the idempotency key.
+  const eventId = (payload.data?.payment_id || payload.data?.subscription_id || payload.event_id || payload.id) as string | undefined;
 
   if (!eventId) {
     logger.error('[webhook.controller] Missing eventId in payload:', payload);
@@ -49,14 +55,21 @@ export async function dodoWebhookHandler(
     return;
   }
 
-  // ── Handle payment success ────────────────────────────────────────────────
+  // ── Handle payment / subscription success ─────────────────────────────────
 
-  if (eventType === 'payment.succeeded') {
+  if (
+    eventType === 'payment.succeeded' ||
+    eventType === 'subscription.active' ||
+    eventType === 'subscription.created' ||
+    eventType === 'subscription.renewed' ||
+    eventType === 'subscription.updated'
+  ) {
     const metadata    = (payload.data?.metadata || payload.metadata || {}) as Record<string, unknown>;
     const figmaUserId = metadata.figmaUserId as string | undefined;
 
-    // Fix PAY-M-02: Read only canonical camelCase field — avoid ambiguous snake_case fallback
-    const paymentType = metadata.paymentType as 'subscription' | 'topup' | undefined;
+    // Fix PAY-M-02: Read canonical camelCase field — fallback to subscription if planId present
+    const paymentType = (metadata.paymentType as 'subscription' | 'topup' | undefined) ||
+      (metadata.planId ? 'subscription' : undefined);
 
     if (!figmaUserId || !paymentType) {
       logger.error('[webhook.controller] Missing required metadata:', { figmaUserId: !!figmaUserId, paymentType });
@@ -71,9 +84,16 @@ export async function dodoWebhookHandler(
         throw new BadRequestError('Invalid planId — only "pro" is valid', 'invalid_plan_id');
       }
 
+      const dodoSubscriptionId = (
+        payload.data?.subscription_id ||
+        payload.subscription_id ||
+        (payload.data?.object === 'subscription' ? payload.data?.id : undefined) ||
+        null
+      ) as string | null;
+
       try {
-        const updatedUser = await activatePlan(figmaUserId, planId);
-        logger.info(`[webhook.controller] Plan activated: ${planId} for ${figmaUserId}`);
+        const updatedUser = await activatePlan(figmaUserId, planId, dodoSubscriptionId);
+        logger.info(`[webhook.controller] Plan activated: ${planId} for ${figmaUserId}${dodoSubscriptionId ? ` (sub: ${dodoSubscriptionId})` : ''}`);
         sendSuccess(res, {
           received:             true,
           activated_plan:       planId,
@@ -145,12 +165,24 @@ export async function dodoWebhookHandler(
 
   if (eventType === 'subscription.cancelled' || eventType === 'payment.cancelled') {
     const metadata    = (payload.data?.metadata || payload.metadata || {}) as Record<string, unknown>;
-    const figmaUserId = metadata.figmaUserId as string | undefined;
+    const figmaUserId = (metadata.figmaUserId as string | undefined) || (payload.data?.customer?.metadata?.figmaUserId as string | undefined);
 
     if (figmaUserId) {
-      // Log the cancellation — plan expires naturally at subscription_ends_at
-      // (runOnceExpire runs on next getActivePlanState call). No immediate action needed.
-      logger.info(`[webhook.controller] Subscription cancelled for ${figmaUserId} — will expire at next login`);
+      try {
+        const users = await getUsersCollection();
+        const updateFields: Record<string, unknown> = {
+          subscription_cancelled: true,
+          updatedAt: new Date(),
+        };
+        const rawEndsAt = payload.data?.next_billing_date || payload.data?.expires_at;
+        if (rawEndsAt) {
+          updateFields.subscription_ends_at = new Date(rawEndsAt);
+        }
+        await users.updateOne({ figmaUserId }, { $set: updateFields });
+        logger.info(`[webhook.controller] Subscription marked cancelled for ${figmaUserId} — active until period ends`);
+      } catch (err) {
+        logger.warn('[webhook.controller] Failed to update subscription_cancelled in DB:', err);
+      }
     }
     sendSuccess(res, { received: true, action: 'cancellation_noted' });
     return;

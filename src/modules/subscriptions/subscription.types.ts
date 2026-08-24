@@ -8,6 +8,7 @@ export interface SubscriptionStatusResponse {
   total_credits: number;
   days_left: number;
   subscription_ends_at: string | null;
+  subscription_cancelled: boolean;
   show_upgrade: boolean;
   show_topup: boolean;
   show_renew: boolean;

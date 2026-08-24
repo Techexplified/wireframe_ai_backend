@@ -33,7 +33,7 @@ import { requestIdStore } from './utils/logger';
 
 // Fix FIREBASE-H-01: Set 300s timeout so complex generations (Claude Sonnet, 32K tokens)
 // are not killed mid-stream. Also increase memory for SSE stream buffering.
-setGlobalOptions({ maxInstances: 10, region: 'us-central1', timeoutSeconds: 300, memory: '512MiB' });
+setGlobalOptions({ maxInstances: 10, region: 'us-central1', timeoutSeconds: 300, memory: '512MiB', invoker: 'public' });
 
 // Initialize Firebase Admin (uses default credentials in deployed env)
 admin.initializeApp();
@@ -48,10 +48,31 @@ if (!process.env.NODE_ENV) {
 
 const app = express();
 
+// 1. CORS is mounted first to ensure all responses (including preflight and errors) include CORS headers
+app.use(cors({
+  origin: true, // Automatically mirrors the request Origin (supports null, figma.com, localhost, ngrok)
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'x-figma-user-id',
+    'x-figma-user-name',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'ngrok-skip-browser-warning',
+    'User-Agent'
+  ],
+  exposedHeaders: ['X-Credits-Left', 'X-Topup-Credits-Left', 'X-Credit-Pool', 'X-Reservation-Id'],
+  credentials: true,
+}));
+
+// Preflight options handler
+app.options('*', cors());
+
 // Fix API-L-03: Add security headers to every response
 app.use((_req: Request, res: Response, next: NextFunction) => {
   res.setHeader('X-Content-Type-Options',  'nosniff');
-  res.setHeader('X-Frame-Options',         'DENY');
   res.setHeader('X-XSS-Protection',        '1; mode=block');
   res.setHeader('Referrer-Policy',         'no-referrer');
   next();
@@ -62,37 +83,6 @@ app.use((_req: Request, _res: Response, next: NextFunction) => {
   const requestId = crypto.randomUUID();
   requestIdStore.run(requestId, next);
 });
-
-// CORS configuration:
-// - In production: allows Figma origins (figma.com).
-// - In local dev & testing: allows localhost, 127.0.0.1, and ngrok tunnels.
-const ALLOWED_DEV_ORIGINS = (process.env.ALLOWED_DEV_ORIGINS || '')
-  .split(',')
-  .map((o) => o.trim())
-  .filter(Boolean);
-
-const PRODUCTION_ORIGINS = ['https://www.figma.com', 'https://figma.com'];
-const ALL_ALLOWED_ORIGINS = [...PRODUCTION_ORIGINS, ...ALLOWED_DEV_ORIGINS];
-
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow non-browser clients (server-side webhook calls, Figma desktop sandbox, curl, Postman)
-    if (!origin) return callback(null, true);
-
-    if (
-      ALL_ALLOWED_ORIGINS.includes(origin) ||
-      origin.endsWith('.figma.com') ||
-      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ||
-      /^https?:\/\/[a-z0-9-]+\.(ngrok-free\.app|ngrok\.io|ngrok\.app)(:\d+)?$/.test(origin)
-    ) {
-      return callback(null, true);
-    }
-
-    callback(new Error(`CORS: origin '${origin}' is not allowed`));
-  },
-  methods:        ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'x-figma-user-id', 'x-figma-user-name', 'Authorization'],
-}));
 
 // ── Raw body capture for webhook signature verification ───────────────────────
 app.use(
@@ -133,22 +123,32 @@ app.use('/webhooks',         webhookRoutes);        // Dodo payment webhook
 
 // Fix PAY-L-01: Add checkout success/cancel stub routes (Dodo redirects here after payment)
 // The plugin polls /subscription/status independently — these pages just close the browser tab.
-app.get('/checkout/success', (_req: Request, res: Response) => {
+app.get(['/checkout/success', '/api/checkout/success'], (_req: Request, res: Response) => {
   res.status(200).send(`
-    <!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
-    <h2>✅ Payment Complete</h2>
-    <p>Return to Figma — your plan will activate within a few seconds.</p>
-    <script>setTimeout(() => window.close(), 3000);</script>
+    <!DOCTYPE html><html><head><meta charset="utf-8"><title>Payment Complete</title></head>
+    <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;text-align:center;padding:80px 20px;background:#111827;color:#f9fafb;">
+    <div style="max-width:440px;margin:0 auto;background:#1f2937;border:1px solid #374151;border-radius:16px;padding:40px 24px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.5);">
+      <div style="font-size:48px;margin-bottom:16px;">🎉</div>
+      <h2 style="margin:0 0 12px;font-size:22px;color:#10b981;">Payment Complete!</h2>
+      <p style="color:#9ca3af;font-size:14px;line-height:1.6;margin:0 0 24px;">Return to Figma — your Pro plan & credits will activate automatically within a few seconds.</p>
+      <div style="font-size:12px;color:#6b7280;">You can close this tab now.</div>
+    </div>
+    <script>setTimeout(() => window.close(), 4000);</script>
     </body></html>
   `);
 });
 
-app.get('/checkout/cancel', (_req: Request, res: Response) => {
+app.get(['/checkout/cancel', '/api/checkout/cancel'], (_req: Request, res: Response) => {
   res.status(200).send(`
-    <!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:60px">
-    <h2>Payment Cancelled</h2>
-    <p>You can return to Figma and try again.</p>
-    <script>setTimeout(() => window.close(), 3000);</script>
+    <!DOCTYPE html><html><head><meta charset="utf-8"><title>Payment Cancelled</title></head>
+    <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;text-align:center;padding:80px 20px;background:#111827;color:#f9fafb;">
+    <div style="max-width:440px;margin:0 auto;background:#1f2937;border:1px solid #374151;border-radius:16px;padding:40px 24px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.5);">
+      <div style="font-size:48px;margin-bottom:16px;">💳</div>
+      <h2 style="margin:0 0 12px;font-size:22px;color:#f59e0b;">Payment Cancelled</h2>
+      <p style="color:#9ca3af;font-size:14px;line-height:1.6;margin:0 0 24px;">You can return to Figma anytime when you are ready to upgrade.</p>
+      <div style="font-size:12px;color:#6b7280;">You can close this tab now.</div>
+    </div>
+    <script>setTimeout(() => window.close(), 4000);</script>
     </body></html>
   `);
 });
@@ -168,4 +168,4 @@ app.use(errorHandler);
 
 // ─── Export as Firebase HTTPS Function ───────────────────────────────────────
 
-export const api = onRequest(app);
+export const wireframeApi = onRequest({ invoker: 'public' }, app);

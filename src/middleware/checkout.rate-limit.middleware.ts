@@ -8,7 +8,7 @@ import { AppError } from '../utils/errors';
 import { logger } from '../utils/logger';
 
 const WINDOW_MS    = 60 * 1000;
-const MAX_REQUESTS = 3;
+const MAX_REQUESTS = 15;
 
 interface CheckoutAttempt {
   timestamps: number[];

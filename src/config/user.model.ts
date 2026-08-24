@@ -15,6 +15,8 @@ export interface UserDoc {
   topup_credits: number;
   subscription_started_at: Date | null;
   subscription_ends_at: Date | null;
+  dodo_subscription_id?: string | null;
+  subscription_cancelled?: boolean;
   createdAt: Date;
   updatedAt?: Date;
 }
