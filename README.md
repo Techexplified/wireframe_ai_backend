@@ -2,6 +2,8 @@
 
 > An enterprise-grade, AI-powered wireframe generation system for Figma. Converts natural language prompts into responsive, themeable, high-fidelity UI wireframes and design systems directly on the Figma canvas.
 
+> **Last Updated**: 27 August 2026 — Reflects all webhook security hardening, payment failure revocation, feedback module, and updated AI model lineup.
+
 ---
 
 ## 📑 Table of Contents
@@ -14,6 +16,7 @@
 - [Database Schema & Collections](#-database-schema--collections)
 - [API Reference](#-api-reference)
 - [Environment Configuration](#-environment-configuration)
+- [Webhook Event Lifecycle](#-webhook-event-lifecycle)
 - [Development, Testing & Deployment](#-development-testing--deployment)
 
 ---
@@ -93,7 +96,7 @@ The platform consists of two integrated tiers:
    - `aiQuotaMiddleware` verifies daily token quota.
    - `aiBudgetMiddleware` computes prompt complexity score (1–10) and verifies estimated USD cost against the plan's per-request cap.
 3. **Atomic Credit Reservation**:
-   - Server resolves model credit cost (e.g. Luna = 1, Sonnet = 5). Free-tier accounts are permanently routed to Luna (1 credit).
+   - Server resolves model credit cost (e.g. Luna = 1, Gemini 3.7 = 2). Free-tier accounts are permanently routed to Luna (1 credit).
    - MongoDB atomically deducts credits using `{$gte: cost}` and generates an authoritative `CreditReservationDoc` with a 10-minute TTL.
 4. **Streaming AI Generation**:
    - OpenRouter streaming connection opened with 120s socket timeout.
@@ -116,13 +119,18 @@ The backend source is located in [`functions/src/`](file:///Users/sunnytyagi/Dow
 | Directory / Module | Description |
 |---|---|
 | [`config/constants.ts`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/config/constants.ts) | **Single Source of Truth** for plan quotas, model pricing, credit pack tiers, rate limit configs, and cost caps. |
+| [`config/database.ts`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/config/database.ts) | Re-export barrel for all collection accessors and TypeScript document interfaces. |
 | [`config/db.connect.ts`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/config/db.connect.ts) | MongoDB connection singleton with lazy reconnect, connection pooling, and automatic index & TTL management. |
-| [`config/user.model.ts`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/config/user.model.ts) | TypeScript document interfaces for all database collections. |
+| [`config/user.model.ts`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/config/user.model.ts) | TypeScript document interfaces for all database collections (`UserDoc`, `CreditReservationDoc`, `FeedbackDoc`, etc.). |
 | [`modules/ai/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/modules/ai/) | AI streaming controller, complexity scoring engine (`ai.complexity.ts`), model routing policy (`ai.router.ts`), and telemetry logger (`ai.telemetry.ts`). |
-| [`modules/credits/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/modules/credits/) | Atomic credit reservation service, refund manager, and balance verification. |
-| [`modules/payments/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/modules/payments/) | Dodo Payments checkout session initiator, webhook signature validator, and webhook controller. |
-| [`modules/users/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/modules/users/) | User lifecycle manager, plan activation, lazy pass expiration, and trial credit provisioner. |
-| [`middleware/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/middleware/) | Security guards: Firebase token auth, checkout rate limiting, require-pro guard, quota & budget checks. |
+| [`modules/credits/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/modules/credits/) | Atomic credit reservation service, refund manager, settlement, and balance verification. |
+| [`modules/payments/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/modules/payments/) | Dodo Payments checkout session initiator (`createPlanCheckout`, `createTopUpCheckout`), webhook signature validator, and subscription management API (`cancelSubscription`, `reactivateSubscription`). |
+| [`modules/subscriptions/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/modules/subscriptions/) | Subscription status, cancel, and reactivate route handlers. |
+| [`modules/users/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/modules/users/) | User lifecycle manager: `getActivePlanState`, `findOrCreate`, `activatePlan`, `revokeFailedPaymentPass`, `expirePass`, and trial credit provisioner. |
+| [`modules/webhooks/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/modules/webhooks/) | Dodo Payments webhook handler with idempotency, signature verification, and event-specific business logic (activation, revocation, cancellation, refund). |
+| [`modules/feedback/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/modules/feedback/) | User feedback submission and admin summary/analytics endpoint. |
+| [`middleware/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/middleware/) | Security guards: Firebase token auth (`auth.middleware.ts`), checkout rate limiting, require-pro guard, startup env validation, and global error handler. |
+| [`utils/`](file:///Users/sunnytyagi/Downloads/wireframe-ai-v4-sizing-fix/functions/src/utils/) | Shared utilities: structured logger with `AsyncLocalStorage` request IDs, idempotency helpers, error classes (`AppError`, `BadRequestError`, `UnauthorizedError`, etc.), and response formatter. |
 
 ---
 
@@ -148,12 +156,10 @@ The backend source is located in [`functions/src/`](file:///Users/sunnytyagi/Dow
 | Model Key | Provider & Model Name | Credit Cost | Cost / 1M Input | Cost / 1M Output | Default For |
 |---|---|---|---|---|---|
 | `gpt-5-6-luna` | OpenAI GPT-5.6 Luna | **1 credit** | $0.10 | $0.60 | **Default / Free Trial** |
-| `kimi-2-6` | Moonshot Kimi K2 | **2 credits** | $0.00 | $0.00 | Budget Option |
-| `gemini-1-5` | Google Gemini 2.0 Flash | **2 credits** | $0.10 | $0.40 | Fast Wireframes |
-| `gpt-4o` | OpenAI GPT-4o | **4 credits** | $2.50 | $10.00 | Complex Systems |
-| `claude-sonnet-4-5` | Anthropic Claude Sonnet 4.5 | **5 credits** | $3.00 | $15.00 | Premium Quality |
+| `deepseek-v4-pro` | DeepSeek V4 Pro | **1 credit** | $0.44 | $0.87 | Ultra-Fast & Intelligent |
+| `gemini-3-7` | Google Gemini 3.7 Flash | **2 credits** | $0.10 | $0.40 | Fast Wireframes |
 
-> **Smart Routing Policy**: Free-tier trial users are always routed to `openai/gpt-5.6-luna` (1 credit cost) regardless of model selection in the UI to prevent trial overcharging. Pro users have full unhindered access to all premium models.
+> **Smart Routing Policy**: Free-tier trial users are always routed to `openai/gpt-5.6-luna` (1 credit cost) regardless of model selection in the UI to prevent trial overcharging. Pro users have full unhindered access to all models.
 
 ---
 
@@ -233,8 +239,19 @@ interface UserDoc {
   topup_credits: number;            // Purchased top-up credit balance
   subscription_started_at: Date | null;
   subscription_ends_at: Date | null;
+  dodo_subscription_id?: string | null;   // Dodo Payments subscription ID for cancel/reactivate
+  subscription_cancelled?: boolean;       // True if user cancelled auto-renewal
+  last_payment_attempt?: PaymentAttemptInfo | null; // Most recent failed payment info (cleared on success)
   createdAt: Date;
   updatedAt?: Date;
+}
+
+interface PaymentAttemptInfo {
+  payment_id?: string;
+  status: 'failed' | 'succeeded';
+  error_code?: string;
+  error_message?: string;
+  failed_at?: Date;
 }
 ```
 
@@ -258,6 +275,8 @@ Deduplication table for payment webhook events.
 interface ProcessedWebhookDoc {
   eventId: string;                  // Dodo event/payment ID (Unique Index)
   processedAt: Date;                // TTL Index (Auto-expires after 90 days)
+  status: 'processing' | 'completed' | 'failed';  // Allows safe retry of failed events
+  updatedAt?: Date;
 }
 ```
 
@@ -314,6 +333,39 @@ interface DailyQuotaDoc {
 }
 ```
 
+### 8. `checkout_rate_limits`
+Sliding-window rate limiter for checkout session creation (prevents checkout spam).
+```typescript
+interface CheckoutRateLimitDoc {
+  figmaUserId: string;              // Compound index with requestedAt
+  requestedAt: Date;                // TTL Index (Auto-expires after 120 seconds)
+}
+```
+
+### 9. `feedbacks`
+User-submitted feedback and ratings for product analytics.
+```typescript
+interface FeedbackDoc {
+  figmaUserId: string;
+  userName?: string;
+  userEmail?: string;
+  plan: 'free' | 'pro';
+  rating: number;                   // 1 to 5
+  category: string;                 // 'wireframe_quality' | 'ai_models' | 'pricing_billing' | 'feature_request' | 'general' | ...
+  message?: string;                 // Max 3000 chars
+  context?: {
+    lastPrompt?: string;
+    selectedModel?: string;
+    platform?: 'desktop' | 'mobile';
+    style?: string;
+  };
+  pluginVersion: string;
+  status: 'new' | 'reviewed' | 'in_progress' | 'resolved';
+  createdAt: Date;
+  updatedAt: Date;
+}
+```
+
 ---
 
 ## 📡 API Reference
@@ -335,10 +387,12 @@ Fetches current plan state, remaining credits, and expiration details.
   "total_credits": 105,
   "days_left": 24,
   "subscription_ends_at": "2026-09-07T12:00:00.000Z",
+  "subscription_cancelled": false,
   "show_upgrade": false,
   "show_topup": true,
   "show_renew": false,
-  "is_trial": false
+  "is_trial": false,
+  "last_payment_attempt": null
 }
 ```
 
@@ -407,10 +461,68 @@ Initiates a top-up credit pack checkout session.
 * **Request Body**: `{"packId": "medium"}`
 * **Response (200 OK)**: `{"checkoutUrl": "...", "checkoutId": "...", "pack_info": {"credits": 50, "price": "$9.99"}}`
 
+#### `POST /api/subscription/cancel`
+Schedules cancellation of the active Pro subscription at end of billing period.
+* **Middleware Chain**: `authMiddleware`
+* **Guard**: Must have active Pro plan; must not already be cancelled.
+* **Response (200 OK)**:
+```json
+{
+  "cancelled": true,
+  "subscription_ends_at": "2026-09-07T12:00:00.000Z",
+  "message": "Your subscription will not renew next cycle. You retain full Pro access and credits until your current period ends."
+}
+```
+
+#### `POST /api/subscription/reactivate`
+Un-cancels a Pro subscription that was scheduled for cancellation.
+* **Middleware Chain**: `authMiddleware`
+* **Guard**: Must have active Pro plan; must be in cancelled state.
+* **Response (200 OK)**:
+```json
+{
+  "reactivated": true,
+  "subscription_ends_at": "2026-09-07T12:00:00.000Z",
+  "message": "Auto-renewal reactivated! Your Pro plan will renew automatically on your next billing date."
+}
+```
+
+---
+
+### Feedback Endpoints
+
+#### `POST /api/feedback/submit`
+Submits user feedback (rating + category + optional message).
+* **Middleware Chain**: `authMiddleware`
+* **Request Body**:
+```json
+{
+  "rating": 4,
+  "category": "wireframe_quality",
+  "message": "The auto-layout is amazing!",
+  "pluginVersion": "v4.2.0"
+}
+```
+* **Response (200 OK)**: `{"received": true, "feedbackId": "...", "message": "Thank you! ..."}`
+
+#### `GET /api/feedback/summary`
+Returns aggregate feedback analytics (total count, average rating, category breakdown, recent entries).
+* **Middleware Chain**: `authMiddleware`
+* **Admin access**: Pass `x-admin-secret` header to include PII fields.
+
+---
+
+### Webhook Endpoints
+
 #### `POST /webhooks/dodo`
-Webhook listener for Dodo Payments events (`payment.succeeded`, `payment.refunded`, `payment.reversed`, `subscription.cancelled`).
-* **Headers**: `x-dodo-signature: t=<timestamp>,v1=<hmac_signature>`
-* **Response (200 OK)**: `{"received": true, "activated_plan": "pro"}`
+Webhook listener for Dodo Payments events. Handles the full lifecycle:
+* **Activation events**: `payment.succeeded`, `subscription.active`, `subscription.renewed`, `subscription.updated` (status=`active`)
+* **Failure events**: `payment.failed`, `subscription.failed`, `subscription.updated` (status=`failed`/`on_hold`/`paused`/`expired`)
+* **Revocation events**: `payment.refunded`, `payment.reversed`
+* **Cancellation events**: `subscription.cancelled`, `payment.cancelled`, `subscription.updated` (status=`cancelled`)
+* **Safely ignored**: `subscription.created` (pending state — does NOT activate plan)
+* **Headers**: `webhook-signature: v1,<base64_hmac>` (Svix format) or `x-dodo-signature: t=<timestamp>,v1=<hmac_signature>` (legacy)
+* **Response (200 OK)**: `{"received": true, "activated_plan": "pro"}` (on success) or `{"received": true, "action": "failure_recorded"}` (on failure)
 
 ---
 
@@ -426,6 +538,7 @@ MONGODB_DB=wireframe_ai
 # ── Dodo Payments ─────────────────────────────────────────────────────────────
 DODO_API_KEY=dodo_live_api_key_here
 DODO_WEBHOOK_SECRET=whsec_live_webhook_secret_here
+DODO_ENV=live                          # 'live' or 'test' (defaults to 'test' — controls API base URL)
 
 # ── Dodo Product Price IDs ────────────────────────────────────────────────────
 DODO_PRODUCT_PRO=p_price_pro_subscription_id
@@ -442,6 +555,41 @@ FREE_TRIAL_CREDITS=3
 # ── AI Gateway (OpenRouter) ───────────────────────────────────────────────────
 OPENROUTER_API_KEY=sk-or-v1-your-openrouter-key
 ```
+
+> **⚠️ Critical**: `DODO_ENV` must be set to `live` for production. When omitted or set to `test`, all Dodo API calls route to `https://test.dodopayments.com`. When set to `live`, they route to `https://live.dodopayments.com`.
+
+---
+
+## 🔄 Webhook Event Lifecycle
+
+Dodo Payments emits webhooks throughout the payment and subscription lifecycle. The backend handles each event as follows:
+
+```
+┌───────────────────────────────────────────────────────────────────────────┐
+│                    Dodo Payments Webhook Events                          │
+├───────────────────────────┬──────────────────────────────────────────────┤
+│ Event                     │ Backend Action                               │
+├───────────────────────────┼──────────────────────────────────────────────┤
+│ subscription.created      │ ✅ Safely ignored (pending state)            │
+│ payment.succeeded         │ ✅ Activate Pro plan OR grant top-up credits │
+│ subscription.active       │ ✅ Activate Pro plan                         │
+│ subscription.renewed      │ ✅ Activate Pro plan (renewal)               │
+│ subscription.updated      │ ⚡ Status-dependent: active → activate,     │
+│   (status-dependent)      │    failed/on_hold/paused → revoke            │
+│ payment.failed            │ ❌ Record failure + revoke unearned Pro      │
+│ subscription.failed       │ ❌ Record failure + revoke unearned Pro      │
+│ payment.refunded          │ 🔄 Expire entire plan (revoke credits)      │
+│ payment.reversed          │ 🔄 Expire entire plan (revoke credits)      │
+│ subscription.cancelled    │ 📋 Mark cancelled (access until period end) │
+│ payment.cancelled         │ 📋 Mark cancelled                           │
+└───────────────────────────┴──────────────────────────────────────────────┘
+```
+
+**Key Safety Guarantees:**
+- `subscription.created` does NOT grant credits (was the root cause of the original payment bug — now fixed)
+- Every webhook is deduplicated via MongoDB unique index on `eventId`
+- Failed events can be safely retried by Dodo (status transitions: `processing` → `failed` → retryable)
+- HMAC-SHA256 signature + 300s timestamp window prevents forged and replayed webhooks
 
 ---
 
@@ -493,13 +641,21 @@ npm test
 Sample test output:
 ```text
 TAP version 13
-ok 1 - Credit & Telemetry Cost Formula Invariants
-ok 2 - Credit Cost & Model Routing Invariants
-ok 3 - Plan Configuration & Limits Invariants
-ok 4 - Webhook Signature & Security Verification
-# tests 13
-# suites 4
-# pass 13
+ok 1  - AI Controller & Feature Route Logic
+ok 2  - Credit & Telemetry Cost Formula Invariants
+ok 3  - Credit Cost & Model Routing Invariants
+ok 4  - Credit Refund Service Invariants
+ok 5  - Atomic Credit Reservation Invariants
+ok 6  - Feedback Module & Route Logic
+ok 7  - Payment Controller & Checkout Route Logic
+ok 8  - Plan Configuration & Limits Invariants
+ok 9  - Manage Billing & Subscription Lifecycle Invariants
+ok 10 - Subscription Controller & Route Logic
+ok 11 - Webhook Controller & Signature Route Logic
+ok 12 - Webhook Signature & Security Verification
+# tests 50
+# suites 12
+# pass 50
 # fail 0
 ```
 
