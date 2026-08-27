@@ -15,7 +15,9 @@ const router = Router();
 router.post(
   '/init',
   authMiddleware,
-  checkoutRateLimitMiddleware,
+  (req: Request, res: Response, next: NextFunction) => {
+    checkoutRateLimitMiddleware(req, res, next).catch(next);
+  },
   (req: Request, res: Response, next: NextFunction) => {
     initCheckoutHandler(req, res).catch(next);
   }
@@ -25,7 +27,9 @@ router.post(
   '/topup',
   authMiddleware,
   requireProMiddleware,
-  checkoutRateLimitMiddleware,
+  (req: Request, res: Response, next: NextFunction) => {
+    checkoutRateLimitMiddleware(req, res, next).catch(next);
+  },
   (req: Request, res: Response, next: NextFunction) => {
     topupCheckoutHandler(req, res).catch(next);
   }

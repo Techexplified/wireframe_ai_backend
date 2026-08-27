@@ -92,7 +92,7 @@ describe('Credit Controller & Generation Pre-Flight / Refund Logic', () => {
       const planState: PlanState = {
         plan: 'pro',
         isActive: true,
-        credits: 2,
+        credits: 1,
         topup_credits: 0,
         days_left: 10,
         subscription_ends_at: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000),
@@ -100,9 +100,9 @@ describe('Credit Controller & Generation Pre-Flight / Refund Logic', () => {
         dodo_subscription_id: 'sub_123',
       };
 
-      // gpt-4o costs 4 credits
+      // gemini-3-7 costs 2 credits
       const req: any = {
-        body: { model: 'gpt-4o' },
+        body: { model: 'gemini-3-7' },
         planState,
         figmaUserId: 'usr_pro_123',
       };

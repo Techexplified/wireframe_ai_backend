@@ -43,10 +43,11 @@ export async function startGenerationHandler(
     maxTokens,
   } = req.body as Partial<GenerateOptions>;
 
-  // Fix C-01: resolve which OpenRouter model will actually execute, charge THAT cost
-  const rawModel        = MODEL_MAP[model] ?? (model.includes('/') ? model : DEFAULT_MODEL);
+  // Enforce free tier model restriction: Only GPT 5.6 Luna is available on free trial
+  const requestedModel  = plan === 'free' ? DEFAULT_MODEL_KEY : model;
+  const rawModel        = MODEL_MAP[requestedModel] ?? (requestedModel.includes('/') ? requestedModel : DEFAULT_MODEL);
   const resolvedModelId = resolveModel(rawModel, req._aiComplexity?.score ?? 0, plan);
-  const resolvedModelKey = Object.entries(MODEL_MAP).find(([, v]) => v === resolvedModelId)?.[0] ?? model;
+  const resolvedModelKey = Object.entries(MODEL_MAP).find(([, v]) => v === resolvedModelId)?.[0] ?? requestedModel;
   const cost = MODEL_CREDIT_COST[resolvedModelKey] ?? CREDIT_COST_GENERATE;
 
   // Guard: plan access

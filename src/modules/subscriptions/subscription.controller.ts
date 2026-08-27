@@ -14,7 +14,7 @@ export async function getSubscriptionStatusHandler(
   req: Request,
   res: Response
 ): Promise<void> {
-  const { plan, isActive, credits, topup_credits, days_left, subscription_ends_at, subscription_cancelled } = req.planState;
+  const { plan, isActive, credits, topup_credits, days_left, subscription_ends_at, subscription_cancelled, last_payment_attempt } = req.planState;
 
   const totalCredits = credits + topup_credits;
 
@@ -31,6 +31,13 @@ export async function getSubscriptionStatusHandler(
     show_topup:             isActive,
     show_renew:             !isActive && credits === 0,
     is_trial:               plan === 'free' && credits > 0,
+    last_payment_attempt:   last_payment_attempt ? {
+      payment_id:    last_payment_attempt.payment_id,
+      status:        last_payment_attempt.status,
+      error_code:    last_payment_attempt.error_code,
+      error_message: last_payment_attempt.error_message,
+      failed_at:     last_payment_attempt.failed_at ? new Date(last_payment_attempt.failed_at).toISOString() : undefined,
+    } : null,
   };
 
   sendSuccess(res, responseData);
@@ -66,7 +73,7 @@ export async function cancelSubscriptionHandler(
       logger.warn(`[subscription.controller] Dodo cancel API call warning for ${user.dodo_subscription_id}: ${msg} — proceeding with local cancellation`);
     }
   } else {
-    logger.info(`[subscription.controller] No dodo_subscription_id found for ${figmaUserId} (testing/legacy account) — applying local cancellation`);
+    logger.error(`[subscription.controller] ALERT: No dodo_subscription_id found for active Pro user ${figmaUserId} during cancellation. Manual cancellation in Dodo dashboard may be required if billing continues.`);
   }
 
   const now = new Date();
@@ -112,7 +119,7 @@ export async function reactivateSubscriptionHandler(
       logger.warn(`[subscription.controller] Dodo reactivate API call warning for ${user.dodo_subscription_id}: ${msg} — proceeding with local reactivation`);
     }
   } else {
-    logger.info(`[subscription.controller] No dodo_subscription_id found for ${figmaUserId} (testing/legacy account) — applying local reactivation`);
+    logger.warn(`[subscription.controller] No dodo_subscription_id found for ${figmaUserId} during reactivation — applying local reactivation`);
   }
 
   const now = new Date();

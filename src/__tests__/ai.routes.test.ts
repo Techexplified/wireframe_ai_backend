@@ -71,9 +71,9 @@ describe('AI Controller & Wireframe Generation Route Logic', () => {
         dodo_subscription_id: 'sub_123',
       };
 
-      // gpt-4o costs 4 credits
+      // gemini-3-7 costs 2 credits
       const req: any = {
-        body: { prompt: 'E-commerce checkout flow', model: 'gpt-4o' },
+        body: { prompt: 'E-commerce checkout flow', model: 'gemini-3-7' },
         planState,
         figmaUserId: 'usr_pro_lowcred',
       };

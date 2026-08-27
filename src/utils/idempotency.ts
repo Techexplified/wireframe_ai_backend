@@ -7,39 +7,65 @@
 import { getWebhooksCollection } from '../config/database';
 
 /**
- * Marks an event as processed.
- * Returns true  → event is NEW, proceed with processing.
- * Returns false → event was already seen, return 200 OK immediately (no-op).
+ * Marks an event as processing.
+ * Returns true  → event is NEW or a retry of a previously failed event, proceed with processing.
+ * Returns false → event was already processed or currently processing, return 200 OK immediately.
  */
 export async function markEventProcessed(eventId: string): Promise<boolean> {
   const col = await getWebhooksCollection();
+  const now = new Date();
 
   try {
     await col.insertOne({
       eventId,
-      processedAt: new Date(),
+      processedAt: now,
+      status: 'processing',
     });
-    // Insert succeeded → first time we've seen this event
     return true;
   } catch (err: unknown) {
-    // MongoDB duplicate key error code 11000
     if (isMongoServerError(err) && err.code === 11000) {
-      console.log(`[idempotency] Duplicate event ${eventId} — skipping`);
+      // Check if the previous attempt failed — if so, atomically claim it for retry
+      const claimed = await col.findOneAndUpdate(
+        { eventId, status: 'failed' },
+        { $set: { status: 'processing', updatedAt: now } }
+      );
+      if (claimed) {
+        console.log(`[idempotency] Retrying previously failed event ${eventId}`);
+        return true;
+      }
+      console.log(`[idempotency] Duplicate or in-flight event ${eventId} — skipping`);
       return false;
     }
-    // Any other error is unexpected — re-throw to let the webhook handler 500
     throw err;
   }
 }
 
 /**
- * Unmarks an event as processed.
- * Called when business logic (activatePlan/addTopUpCredits) fails AFTER the
- * idempotency record was committed, so Dodo can safely retry the webhook.
+ * Marks an event as successfully completed.
  */
-export async function unmarkEventProcessed(eventId: string): Promise<void> {
+export async function completeEventProcessed(eventId: string): Promise<void> {
   const col = await getWebhooksCollection();
-  await col.deleteOne({ eventId });
+  await col.updateOne(
+    { eventId },
+    { $set: { status: 'completed', updatedAt: new Date() } }
+  );
+}
+
+/**
+ * Marks an event as failed so Dodo can safely retry without deleting the record.
+ * Prevents concurrent double-processing race conditions during retries.
+ */
+export async function markEventFailed(eventId: string): Promise<void> {
+  const col = await getWebhooksCollection();
+  await col.updateOne(
+    { eventId },
+    { $set: { status: 'failed', updatedAt: new Date() } }
+  );
+}
+
+/** Backward compatibility alias */
+export async function unmarkEventProcessed(eventId: string): Promise<void> {
+  return markEventFailed(eventId);
 }
 
 // Type guard for MongoDB errors

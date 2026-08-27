@@ -70,9 +70,7 @@ export const CREDIT_COST_GENERATE = 1;
 //
 //   gpt-5-6-luna      → 1 credit  (default / recommended)
 //   deepseek-v4-pro   → 1 credit  (ultra-fast & intelligent)
-//   gemini-2-7 / 3-7  → 2 credits (Google Gemini 2.7 / 3.7 Flash)
-//   kimi-2-6          → 2 credits
-//   gpt-4o            → 4 credits
+//   gemini-3-7        → 2 credits (Google Gemini 3.7 Flash)
 //
 // Free users are always routed to gpt-5.6-luna (1 credit/gen) regardless of selection.
 
@@ -80,9 +78,6 @@ export const MODEL_CREDIT_COST: Record<string, number> = {
   'gpt-5-6-luna':      1,
   'deepseek-v4-pro':   1,
   'gemini-3-7':        2,
-  'gemini-2-7':        2,
-  'kimi-2-6':          2,
-  'gpt-4o':            4,
 };
 
 // ─── AI Model Map ─────────────────────────────────────────────────────────────
@@ -92,9 +87,6 @@ export const MODEL_MAP: Record<string, string> = {
   'gpt-5-6-luna':      'openai/gpt-5.6-luna',
   'deepseek-v4-pro':   'deepseek/deepseek-v4-pro',
   'gemini-3-7':        'google/gemini-3.7-flash',
-  'gemini-2-7':        'google/gemini-2.7-flash',
-  'kimi-2-6':          'moonshotai/kimi-k2:free',
-  'gpt-4o':            'openai/gpt-4o',
 };
 export const DEFAULT_MODEL = 'openai/gpt-5.6-luna';
 export const DEFAULT_MODEL_KEY = 'gpt-5-6-luna';
@@ -104,12 +96,9 @@ export const DEFAULT_MODEL_KEY = 'gpt-5-6-luna';
 // Used by telemetry to compute estimated cost per request.
 
 export const MODEL_PRICING: Record<string, { inputPer1M: number; outputPer1M: number }> = {
-  'moonshotai/kimi-k2:free':       { inputPer1M: 0,    outputPer1M: 0     },
   'google/gemini-3.7-flash':       { inputPer1M: 0.10, outputPer1M: 0.40  },
-  'google/gemini-2.7-flash':       { inputPer1M: 0.10, outputPer1M: 0.40  },
   'openai/gpt-5.6-luna':           { inputPer1M: 0.10, outputPer1M: 0.60  },
   'deepseek/deepseek-v4-pro':      { inputPer1M: 0.44, outputPer1M: 0.87  },
-  'openai/gpt-4o':                 { inputPer1M: 2.50, outputPer1M: 10.00 },
 };
 
 // ─── AI Rate Limit Config ─────────────────────────────────────────────────────

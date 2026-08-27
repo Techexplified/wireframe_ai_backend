@@ -5,7 +5,7 @@ import { computeCostUSD } from '../modules/ai/ai.telemetry';
 
 describe('Credit & Telemetry Cost Formula Invariants', () => {
   it('computeCostUSD includes reasoning tokens at output token pricing', () => {
-    const model = 'openai/gpt-4o'; // input: $2.50/1M, output: $10.00/1M
+    const model = 'deepseek/deepseek-v4-pro'; // input: $0.44/1M, output: $0.87/1M
     const promptTokens = 1000;
     const completionTokens = 2000;
     const reasoningTokens = 1000;
@@ -13,8 +13,8 @@ describe('Credit & Telemetry Cost Formula Invariants', () => {
     const costWithReasoning = computeCostUSD(model, promptTokens, completionTokens, reasoningTokens);
     const costWithoutReasoning = computeCostUSD(model, promptTokens, completionTokens, 0);
 
-    // 1000 reasoning tokens at $10/1M = $0.010
-    const expectedDifference = (1000 / 1_000_000) * 10;
+    // 1000 reasoning tokens at $0.87/1M = $0.00087
+    const expectedDifference = (1000 / 1_000_000) * 0.87;
 
     assert.ok(costWithReasoning > costWithoutReasoning, 'Reasoning tokens must increase cost');
     assert.strictEqual(

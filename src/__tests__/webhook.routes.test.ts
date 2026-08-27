@@ -120,7 +120,7 @@ describe('Webhook Controller & Signature Route Logic', () => {
     });
 
     it('throws BadRequestError (400) when eventId is missing in payload', async () => {
-      const payload = { event: 'payment.succeeded' }; // missing id / payment_id
+      const payload = { event: 'payment.succeeded' }; // missing id / payment_id / msgId
       const bodyBuf = Buffer.from(JSON.stringify(payload));
       const now = Math.floor(Date.now() / 1000);
       const signature = createValidSignature(bodyBuf, now);
@@ -144,6 +144,87 @@ describe('Webhook Controller & Signature Route Logic', () => {
           return true;
         }
       );
+    });
+
+    it('safely acknowledges and ignores subscription.created event without activating plan', async () => {
+      const payload = {
+        type: 'subscription.created',
+        id: `sub_created_test_${Date.now()}`,
+        data: {
+          subscription_id: `sub_created_${Date.now()}`,
+          status: 'pending',
+          customer: { metadata: { figmaUserId: 'test-user-sub-created' } },
+        },
+      };
+      const bodyBuf = Buffer.from(JSON.stringify(payload));
+      const now = Math.floor(Date.now() / 1000);
+      const signature = createValidSignature(bodyBuf, now);
+
+      const req: any = {
+        headers: { 'webhook-signature': signature },
+        body: payload,
+        rawBody: bodyBuf,
+        ip: '127.0.0.1',
+      };
+      const { res, getStatusCode, getBody } = createMockResponse();
+
+      if (process.env.MONGODB_URI) {
+        await dodoWebhookHandler(req, res);
+        assert.strictEqual(getStatusCode(), 200);
+        assert.strictEqual(getBody()?.ignored, true);
+      } else {
+        await assert.rejects(
+          async () => {
+            await dodoWebhookHandler(req, res);
+          },
+          (err: any) => {
+            assert.ok(err.message.includes('MONGODB_URI'));
+            return true;
+          }
+        );
+      }
+    });
+
+    it('handles payment.failed cleanly and records failure without granting credits', async () => {
+      const payload = {
+        type: 'payment.failed',
+        id: `pay_fail_test_${Date.now()}`,
+        data: {
+          payment_id: `pay_fail_${Date.now()}`,
+          status: 'failed',
+          error_code: 'card_declined',
+          error_message: 'Your card was declined.',
+          customer: { metadata: { figmaUserId: 'test-user-pay-fail' } },
+        },
+      };
+      const bodyBuf = Buffer.from(JSON.stringify(payload));
+      const now = Math.floor(Date.now() / 1000);
+      const signature = createValidSignature(bodyBuf, now);
+
+      const req: any = {
+        headers: { 'webhook-signature': signature },
+        body: payload,
+        rawBody: bodyBuf,
+        ip: '127.0.0.1',
+      };
+      const { res, getStatusCode, getBody } = createMockResponse();
+
+      if (process.env.MONGODB_URI) {
+        await dodoWebhookHandler(req, res);
+        assert.strictEqual(getStatusCode(), 200);
+        assert.strictEqual(getBody()?.action, 'failure_recorded');
+        assert.strictEqual(getBody()?.error_code, 'card_declined');
+      } else {
+        await assert.rejects(
+          async () => {
+            await dodoWebhookHandler(req, res);
+          },
+          (err: any) => {
+            assert.ok(err.message.includes('MONGODB_URI'));
+            return true;
+          }
+        );
+      }
     });
   });
 });

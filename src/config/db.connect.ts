@@ -15,10 +15,13 @@ import {
   RateLimitDoc,
   DailyQuotaDoc,
   CreditReservationDoc,
+  FeedbackDoc,
+  CheckoutRateLimitDoc,
 } from './user.model';
 
 let cachedClient: MongoClient | null = null;
 let cachedDb:     Db | null          = null;
+let lastPingTime = 0;
 
 export async function connectToDatabase(): Promise<Db> {
   const uri    = process.env.MONGODB_URI || '';
@@ -26,11 +29,22 @@ export async function connectToDatabase(): Promise<Db> {
 
   if (!uri) throw new Error('MONGODB_URI environment variable is not set');
 
-  // Fix PERF-H-01: Return cached db immediately — no ping on every request.
-  // Lazy reconnect: if a real operation fails with MongoNetworkError, callers
-  // should catch and call connectToDatabase() again (retryWrites handles most cases).
+  const now = Date.now();
+  // Return cached db if alive; verify health every 30 seconds
   if (cachedClient && cachedDb) {
-    return cachedDb;
+    if (now - lastPingTime < 30_000) {
+      return cachedDb;
+    }
+    try {
+      await cachedClient.db('admin').command({ ping: 1 });
+      lastPingTime = now;
+      return cachedDb;
+    } catch {
+      console.warn('[db.connect] Stale MongoDB connection detected, reconnecting...');
+      try { await cachedClient.close(); } catch {}
+      cachedClient = null;
+      cachedDb = null;
+    }
   }
 
   cachedClient = new MongoClient(uri, {
@@ -44,6 +58,7 @@ export async function connectToDatabase(): Promise<Db> {
 
   await cachedClient.connect();
   cachedDb = cachedClient.db(dbName);
+  lastPingTime = Date.now();
 
   // Fix PERF-H-02: Run index creation non-blockingly in background
   // to avoid adding 1.2s of latency to the first user request.
@@ -173,6 +188,35 @@ async function ensureIndexes(db: Db): Promise<void> {
     { expiresAt: 1 },
     { background: true, expireAfterSeconds: 0 }
   );
+
+  // 8. feedbacks — timeline & user queries
+  await safeCreateIndex(
+    db.collection('feedbacks'),
+    { createdAt: -1 },
+    { background: true }
+  );
+  await safeCreateIndex(
+    db.collection('feedbacks'),
+    { figmaUserId: 1, createdAt: -1 },
+    { background: true }
+  );
+  await safeCreateIndex(
+    db.collection('feedbacks'),
+    { rating: 1, category: 1 },
+    { background: true }
+  );
+
+  // 9. checkout_rate_limits — sliding window query index + 120s TTL
+  await safeCreateIndex(
+    db.collection('checkout_rate_limits'),
+    { figmaUserId: 1, requestedAt: -1 },
+    { background: true }
+  );
+  await safeCreateIndex(
+    db.collection('checkout_rate_limits'),
+    { requestedAt: 1 },
+    { background: true, expireAfterSeconds: 120 }
+  );
 }
 
 // ─── Typed collection helpers ─────────────────────────────────────────────────
@@ -202,6 +246,11 @@ export async function getRateLimitsCollection(): Promise<Collection<RateLimitDoc
   return db.collection<RateLimitDoc>('generation_rate_limits');
 }
 
+export async function getCheckoutRateLimitsCollection(): Promise<Collection<CheckoutRateLimitDoc>> {
+  const db = await connectToDatabase();
+  return db.collection<CheckoutRateLimitDoc>('checkout_rate_limits');
+}
+
 export async function getDailyQuotasCollection(): Promise<Collection<DailyQuotaDoc>> {
   const db = await connectToDatabase();
   return db.collection<DailyQuotaDoc>('daily_token_quotas');
@@ -211,6 +260,11 @@ export async function getDailyQuotasCollection(): Promise<Collection<DailyQuotaD
 export async function getCreditReservationsCollection(): Promise<Collection<CreditReservationDoc>> {
   const db = await connectToDatabase();
   return db.collection<CreditReservationDoc>('credit_reservations');
+}
+
+export async function getFeedbacksCollection(): Promise<Collection<FeedbackDoc>> {
+  const db = await connectToDatabase();
+  return db.collection<FeedbackDoc>('feedbacks');
 }
 
 // Export for use in connection error recovery

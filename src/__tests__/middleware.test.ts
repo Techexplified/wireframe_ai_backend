@@ -120,25 +120,21 @@ describe('Express Middlewares Suite', () => {
   });
 
   describe('checkout.rate-limit.middleware', () => {
-    it('blocks request with 429 when checkout rate limit is exceeded', () => {
+    it('blocks request with 429 when checkout rate limit is exceeded', async () => {
       const userId = `usr_ratelimit_${Date.now()}`;
       const req: any = { figmaUserId: userId, ip: '127.0.0.1' };
       const { res } = createMockResponse();
 
-      assert.throws(
-        () => {
-          // Fire 16 requests in rapid succession (limit is 15)
-          for (let i = 0; i < 16; i++) {
-            checkoutRateLimitMiddleware(req, res, () => {});
-          }
-        },
-        (err: any) => {
-          assert.ok(err instanceof AppError);
-          assert.strictEqual(err.statusCode, 429);
-          assert.strictEqual(err.errorCode, 'rate_limit_exceeded');
-          return true;
-        }
-      );
+      let receivedErr: any = null;
+      for (let i = 0; i < 16; i++) {
+        await checkoutRateLimitMiddleware(req, res, (err?: any) => {
+          if (err) receivedErr = err;
+        });
+      }
+
+      assert.ok(receivedErr instanceof AppError);
+      assert.strictEqual(receivedErr.statusCode, 429);
+      assert.strictEqual(receivedErr.errorCode, 'rate_limit_exceeded');
     });
   });
 

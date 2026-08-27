@@ -14,7 +14,6 @@ const DODO_ENV         = process.env.DODO_ENV         || 'test';
 const DODO_BASE_URL    = DODO_ENV === 'live'
   ? 'https://live.dodopayments.com'
   : 'https://test.dodopayments.com';
-const APP_BASE_URL     = process.env.APP_BASE_URL     || '';
 
 const dodoClient = axios.create({
   baseURL: DODO_BASE_URL,
@@ -22,7 +21,7 @@ const dodoClient = axios.create({
     Authorization:  `Bearer ${DODO_API_KEY}`,
     'Content-Type': 'application/json',
   },
-  timeout: 10000,
+  timeout: 25000,
 });
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -63,7 +62,6 @@ export async function createPlanCheckout(
       existing_topup_credits: String(existingTopupCredits),
       existing_days_left:     String(existingDaysLeft),
     },
-    return_url: `${APP_BASE_URL}/checkout/success`,
   });
 
   return {
@@ -98,7 +96,6 @@ export async function createTopUpCheckout(
       packId,
       paymentType: 'topup',  // canonical field (webhook reads this)
     },
-    return_url: `${APP_BASE_URL}/checkout/success`,
   });
 
   return {

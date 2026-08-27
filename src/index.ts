@@ -27,6 +27,7 @@ import subscriptionRoutes from './modules/subscriptions/subscription.routes';
 import paymentRoutes      from './modules/payments/payment.routes';
 import aiRoutes           from './modules/ai/ai.routes';
 import webhookRoutes      from './modules/webhooks/webhook.routes';
+import feedbackRoutes     from './modules/feedback/feedback.routes';
 import { errorHandler }   from './middleware/error.middleware';
 import { NotFoundError }  from './utils/errors';
 import { requestIdStore } from './utils/logger';
@@ -48,14 +49,32 @@ if (!process.env.NODE_ENV) {
 
 const app = express();
 
-// 1. CORS is mounted first to ensure all responses (including preflight and errors) include CORS headers
+// 1. CORS is mounted first with validated allowed origins
+const ALLOWED_ORIGIN_PATTERNS = [
+  /^https:\/\/(www\.)?figma\.com$/,
+  /^https:\/\/[a-z0-9-]+\.ngrok-free\.app$/,
+  /^https:\/\/[a-z0-9-]+\.ngrok\.io$/,
+  /^http:\/\/localhost(:[0-9]+)?$/,
+  /^http:\/\/127\.0\.0\.1(:[0-9]+)?$/,
+  /^null$/,
+];
+
 app.use(cors({
-  origin: true, // Automatically mirrors the request Origin (supports null, figma.com, localhost, ngrok)
+  origin: (requestOrigin, callback) => {
+    if (!requestOrigin) return callback(null, true);
+    const isAllowed = ALLOWED_ORIGIN_PATTERNS.some(pattern => pattern.test(requestOrigin));
+    if (isAllowed || requestOrigin === 'null') {
+      callback(null, true);
+    } else {
+      callback(null, false);
+    }
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: [
     'Content-Type',
     'x-figma-user-id',
     'x-figma-user-name',
+    'x-admin-secret',
     'Authorization',
     'X-Requested-With',
     'Accept',
@@ -70,11 +89,12 @@ app.use(cors({
 // Preflight options handler
 app.options('*', cors());
 
-// Fix API-L-03: Add security headers to every response
+// Fix API-L-03 & NEW-L-03: Add security headers and CSP to every response
 app.use((_req: Request, res: Response, next: NextFunction) => {
   res.setHeader('X-Content-Type-Options',  'nosniff');
   res.setHeader('X-XSS-Protection',        '1; mode=block');
   res.setHeader('Referrer-Policy',         'no-referrer');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; form-action 'none'");
   next();
 });
 
@@ -97,6 +117,11 @@ app.use(
       const raw = Buffer.concat(chunks);
       (req as Request & { rawBody: Buffer }).rawBody =
         raw.length > 0 ? raw : Buffer.from(JSON.stringify(req.body || ''));
+      if ((!req.body || Object.keys(req.body).length === 0) && raw.length > 0) {
+        try {
+          req.body = JSON.parse(raw.toString('utf8'));
+        } catch {}
+      }
       next();
     };
 
@@ -119,39 +144,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.use('/api/subscription', subscriptionRoutes);  // Trigger A
 app.use('/api/features',     aiRoutes);             // Trigger B
 app.use('/api/checkout',     paymentRoutes);        // Trigger C + D
+app.use('/api/feedback',     feedbackRoutes);       // User Feedback Module
 app.use('/webhooks',         webhookRoutes);        // Dodo payment webhook
-
-// Fix PAY-L-01: Add checkout success/cancel stub routes (Dodo redirects here after payment)
-// The plugin polls /subscription/status independently — these pages just close the browser tab.
-app.get(['/checkout/success', '/api/checkout/success'], (_req: Request, res: Response) => {
-  res.status(200).send(`
-    <!DOCTYPE html><html><head><meta charset="utf-8"><title>Payment Complete</title></head>
-    <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;text-align:center;padding:80px 20px;background:#111827;color:#f9fafb;">
-    <div style="max-width:440px;margin:0 auto;background:#1f2937;border:1px solid #374151;border-radius:16px;padding:40px 24px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.5);">
-      <div style="font-size:48px;margin-bottom:16px;">🎉</div>
-      <h2 style="margin:0 0 12px;font-size:22px;color:#10b981;">Payment Complete!</h2>
-      <p style="color:#9ca3af;font-size:14px;line-height:1.6;margin:0 0 24px;">Return to Figma — your Pro plan & credits will activate automatically within a few seconds.</p>
-      <div style="font-size:12px;color:#6b7280;">You can close this tab now.</div>
-    </div>
-    <script>setTimeout(() => window.close(), 4000);</script>
-    </body></html>
-  `);
-});
-
-app.get(['/checkout/cancel', '/api/checkout/cancel'], (_req: Request, res: Response) => {
-  res.status(200).send(`
-    <!DOCTYPE html><html><head><meta charset="utf-8"><title>Payment Cancelled</title></head>
-    <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;text-align:center;padding:80px 20px;background:#111827;color:#f9fafb;">
-    <div style="max-width:440px;margin:0 auto;background:#1f2937;border:1px solid #374151;border-radius:16px;padding:40px 24px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.5);">
-      <div style="font-size:48px;margin-bottom:16px;">💳</div>
-      <h2 style="margin:0 0 12px;font-size:22px;color:#f59e0b;">Payment Cancelled</h2>
-      <p style="color:#9ca3af;font-size:14px;line-height:1.6;margin:0 0 24px;">You can return to Figma anytime when you are ready to upgrade.</p>
-      <div style="font-size:12px;color:#6b7280;">You can close this tab now.</div>
-    </div>
-    <script>setTimeout(() => window.close(), 4000);</script>
-    </body></html>
-  `);
-});
 
 // Health check
 app.get('/health', (_req: Request, res: Response) => {

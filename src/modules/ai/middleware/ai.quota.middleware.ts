@@ -70,6 +70,6 @@ export async function incrementDailyTokenUsage(
       { upsert: true }
     );
   } catch (err) {
-    console.warn('[ai.quota] Failed to update daily token usage:', err);
+    logger.warn('[ai.quota] Failed to update daily token usage:', err);
   }
 }

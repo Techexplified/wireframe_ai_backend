@@ -142,31 +142,31 @@ export async function addTopUpCredits(
 ): Promise<{ topup_credits: number }> {
   const users = await getUsersCollection();
 
-  // Fix CREDIT-M-01: Reject if balance would exceed the ceiling
-  const user = await users.findOne({ figmaUserId });
-  if (!user) {
-    logger.error(`[credit.service] addTopUpCredits: User '${figmaUserId}' not found`);
-    throw new Error(`addTopUpCredits: user '${figmaUserId}' not found — cannot add credits`);
-  }
+  const incAmount = Math.max(0, creditsToAdd);
 
-  if (user.topup_credits + creditsToAdd > MAX_TOPUP_CREDITS) {
-    const allowed = Math.max(0, MAX_TOPUP_CREDITS - user.topup_credits);
-    logger.warn(`[credit.service] addTopUpCredits: capping topup_credits at ${MAX_TOPUP_CREDITS} for ${figmaUserId} (requested +${creditsToAdd}, allowed +${allowed})`);
-    creditsToAdd = allowed;
-  }
-
-  if (creditsToAdd === 0) {
-    return { topup_credits: user.topup_credits };
-  }
-
-  const updated = await users.findOneAndUpdate(
+  // Atomic increment with ceiling clamp & clear previous failure
+  let updated = await users.findOneAndUpdate(
     { figmaUserId },
-    { $inc: { topup_credits: creditsToAdd } },
+    {
+      $inc: { topup_credits: incAmount },
+      $unset: { last_payment_attempt: '' },
+    },
     { returnDocument: 'after' }
   );
 
   if (!updated) {
+    logger.error(`[credit.service] addTopUpCredits: User '${figmaUserId}' not found`);
     throw new Error(`addTopUpCredits: user '${figmaUserId}' not found — cannot add credits`);
+  }
+
+  if (updated.topup_credits > MAX_TOPUP_CREDITS) {
+    logger.warn(`[credit.service] addTopUpCredits: clamping topup_credits at ${MAX_TOPUP_CREDITS} for ${figmaUserId}`);
+    const clamped = await users.findOneAndUpdate(
+      { figmaUserId },
+      { $set: { topup_credits: MAX_TOPUP_CREDITS } },
+      { returnDocument: 'after' }
+    );
+    if (clamped) updated = clamped;
   }
 
   return { topup_credits: updated.topup_credits };

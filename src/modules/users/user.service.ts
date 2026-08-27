@@ -62,11 +62,19 @@ export async function getActivePlanState(figmaUserId: string, name?: string): Pr
     if (updated) user = updated;
   }
 
-  // Build the plan state response
+  // Build the plan state response (pass recent failure if within 5-minute window)
   const endsAt   = user.subscription_ends_at ?? null;
   const daysLeft = endsAt
     ? Math.max(0, Math.ceil((endsAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)))
     : 0;
+
+  let lastPaymentAttempt = user.last_payment_attempt ?? null;
+  if (lastPaymentAttempt?.failed_at) {
+    const ageMs = now.getTime() - new Date(lastPaymentAttempt.failed_at).getTime();
+    if (ageMs > 5 * 60 * 1000) {
+      lastPaymentAttempt = null;
+    }
+  }
 
   const planState: PlanState = {
     plan:                  user.plan,
@@ -77,6 +85,7 @@ export async function getActivePlanState(figmaUserId: string, name?: string): Pr
     subscription_ends_at:  endsAt,
     subscription_cancelled: user.subscription_cancelled ?? false,
     dodo_subscription_id:  user.dodo_subscription_id ?? null,
+    last_payment_attempt:  lastPaymentAttempt,
   };
 
   return { user, planState };
@@ -136,10 +145,12 @@ async function runOnceExpire(figmaUserId: string): Promise<UserWithId> {
       $set: {
         plan:                    'free' as PlanId,
         credits:                 0,
-        topup_credits:           0,
+        // BUG-H-03 fix: topup_credits are non-expiring and roll over indefinitely
         subscription_ends_at:    null,
         subscription_started_at: null,
         subscription_cancelled:  false,
+        dodo_subscription_id:    null,
+        updatedAt:               new Date(),
       },
     },
     { returnDocument: 'after' }
@@ -147,6 +158,39 @@ async function runOnceExpire(figmaUserId: string): Promise<UserWithId> {
 
   if (!updated) {
     throw new Error('runOnceExpire: user not found');
+  }
+
+  return updated;
+}
+
+// ─── revokeFailedPaymentPass — revokes unearned Pro status after payment failure ─
+
+export async function revokeFailedPaymentPass(figmaUserId: string): Promise<UserWithId> {
+  const users = await getUsersCollection();
+  const existing = await users.findOne({ figmaUserId });
+  const trialCredits = FREE_TRIAL_CREDITS;
+  const resetCredits = existing && existing.credits >= 100 ? trialCredits : Math.min(existing?.credits ?? 0, trialCredits);
+
+  logger.info(`[user.service] Revoking unearned/failed pass for ${figmaUserId} — restoring ${resetCredits} trial credits`);
+
+  const updated = await users.findOneAndUpdate(
+    { figmaUserId },
+    {
+      $set: {
+        plan:                    'free' as PlanId,
+        credits:                 resetCredits,
+        subscription_ends_at:    null,
+        subscription_started_at: null,
+        subscription_cancelled:  false,
+        dodo_subscription_id:    null,
+        updatedAt:               new Date(),
+      },
+    },
+    { returnDocument: 'after' }
+  );
+
+  if (!updated) {
+    throw new Error('revokeFailedPaymentPass: user not found');
   }
 
   return updated;
@@ -192,6 +236,7 @@ export async function activatePlan(
     { figmaUserId }, // NO upsert — must pre-exist
     {
       $set: updateFields,
+      $unset: { last_payment_attempt: '' },
     },
     { returnDocument: 'after' }
   );

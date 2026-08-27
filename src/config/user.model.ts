@@ -6,6 +6,14 @@
 
 // ─── Users collection ─────────────────────────────────────────────────────────
 
+export interface PaymentAttemptInfo {
+  payment_id?: string;
+  status: 'failed' | 'succeeded';
+  error_code?: string;
+  error_message?: string;
+  failed_at?: Date;
+}
+
 export interface UserDoc {
   figmaUserId: string;
   firebaseUid?: string;    // Fix AUTH-C-01: Firebase Anonymous UID bound on first auth
@@ -17,6 +25,7 @@ export interface UserDoc {
   subscription_ends_at: Date | null;
   dodo_subscription_id?: string | null;
   subscription_cancelled?: boolean;
+  last_payment_attempt?: PaymentAttemptInfo | null;
   createdAt: Date;
   updatedAt?: Date;
 }
@@ -26,6 +35,14 @@ export interface UserDoc {
 export interface ProcessedWebhookDoc {
   eventId: string;
   processedAt: Date;
+  status: 'processing' | 'completed' | 'failed';
+  updatedAt?: Date;
+}
+
+// ─── Checkout Rate Limits collection (`checkout_rate_limits`) ────────────────
+export interface CheckoutRateLimitDoc {
+  figmaUserId: string;
+  requestedAt: Date;
 }
 
 // ─── Credit Reservations collection ──────────────────────────────────────────
@@ -85,4 +102,26 @@ export interface DailyQuotaDoc {
   date:        string;       // YYYY-MM-DD UTC
   tokensUsed:  number;
   createdAt:   Date;
+}
+
+// ─── Feedbacks collection (`feedbacks`) ─────────────────────────────────────
+
+export interface FeedbackDoc {
+  figmaUserId:   string;
+  userName?:     string;
+  userEmail?:    string;
+  plan:          'free' | 'pro';
+  rating:        number; // 1 to 5
+  category:      string;
+  message?:      string;
+  context?: {
+    lastPrompt?:    string;
+    selectedModel?: string;
+    platform?:      'desktop' | 'mobile';
+    style?:         string;
+  };
+  pluginVersion: string;
+  status:        'new' | 'reviewed' | 'in_progress' | 'resolved';
+  createdAt:     Date;
+  updatedAt:     Date;
 }

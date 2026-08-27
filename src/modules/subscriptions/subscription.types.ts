@@ -1,5 +1,3 @@
-// ─── modules/subscriptions/subscription.types.ts — Subscription response types ─
-
 export interface SubscriptionStatusResponse {
   plan: string;
   isActive: boolean;
@@ -13,4 +11,11 @@ export interface SubscriptionStatusResponse {
   show_topup: boolean;
   show_renew: boolean;
   is_trial: boolean;
+  last_payment_attempt?: {
+    payment_id?: string;
+    status: 'failed' | 'succeeded';
+    error_code?: string;
+    error_message?: string;
+    failed_at?: string;
+  } | null;
 }

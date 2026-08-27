@@ -15,14 +15,15 @@ export async function initCheckoutHandler(
   res: Response
 ): Promise<void> {
   const { planId } = req.body as InitCheckoutRequest;
-  const { plan: currentPlan, isActive, topup_credits, days_left } = req.planState;
+  const { plan: currentPlan, isActive, topup_credits, days_left, subscription_cancelled } = req.planState;
 
   if (!planId || planId !== 'pro') {
     throw new BadRequestError('planId must be "pro"', 'invalid_plan');
   }
 
-  if (isActive && currentPlan === planId) {
-    throw new ConflictError('You are already on the Pro plan.', 'already_on_plan');
+  // BUG-C-01 fix: If the user cancelled auto-renewal, allow them to re-subscribe
+  if (isActive && currentPlan === planId && !subscription_cancelled) {
+    throw new ConflictError('You are already on the Pro plan with active auto-renewal.', 'already_on_plan');
   }
 
   if (!PLAN_CONFIG[planId].priceId) {

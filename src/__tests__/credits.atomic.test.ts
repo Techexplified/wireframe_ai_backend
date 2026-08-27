@@ -6,9 +6,9 @@ import { resolveModel } from '../modules/ai/ai.router';
 
 describe('Credit Cost & Model Routing Invariants', () => {
   it('free plan users are always routed to DEFAULT_MODEL (1 credit)', () => {
-    // Even if free user requested gpt-4o (4 credits)
-    const rawModel = MODEL_MAP['gpt-4o'];
-    const routedModel = resolveModel(rawModel, 4, 'free');
+    // Even if free user requested gemini-3-7 (2 credits)
+    const rawModel = MODEL_MAP['gemini-3-7'];
+    const routedModel = resolveModel(rawModel, 2, 'free');
 
     assert.strictEqual(routedModel, DEFAULT_MODEL, 'Free user must be routed to DEFAULT_MODEL');
   });

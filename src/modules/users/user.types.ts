@@ -5,6 +5,7 @@
 // circular imports); re-exported here for convenience.
 
 import { PlanId } from '../../config/constants';
+import { PaymentAttemptInfo } from '../../config/user.model';
 export type { UserDoc } from '../../config/database';
 
 export interface PlanState {
@@ -16,4 +17,5 @@ export interface PlanState {
   subscription_ends_at: Date | null;
   subscription_cancelled?: boolean;
   dodo_subscription_id?: string | null;
+  last_payment_attempt?: PaymentAttemptInfo | null;
 }
