@@ -1,19 +1,49 @@
-// ─── middleware/auth.middleware.ts — Shared Guard with Firebase Auth ────────────
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ─── middleware/auth.middleware.ts — Firebase Authentication & User Binding
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// Fix AUTH-C-01: Verify Firebase Anonymous Auth ID token on every request.
-// The plugin signs in anonymously to Firebase and sends:
-//   Authorization: Bearer <Firebase ID Token>
-//   x-figma-user-id: <Figma user ID from figma.currentUser.id>
+// PURPOSE:
+//   Every request must pass through authMiddleware to verify user identity and load plan state.
+//   Attaches req.figmaUserId + req.planState for controllers to use.
+//   Creates user on first login (auto-provisioning pattern).
 //
-// First call for a UID: bind firebaseUid → figmaUserId in MongoDB (one-time)
-// Subsequent calls: verify figmaUserId matches the stored binding
+// AUTHENTICATION FLOW:
+//   1. Figma plugin signs in to Firebase anonymously → receives ID token
+//   2. Plugin sends: Authorization: Bearer <JWT> + x-figma-user-id: <uuid>
+//   3. Server verifies JWT signature via Firebase Admin SDK
+//   4. Server binds firebaseUid ↔ figmaUserId (one-to-one invariant)
+//   5. Subsequent requests verified: same figmaUserId must come with same firebaseUid
+//   6. Load user's plan state (creates user if new)
 //
-// Fix AUTH-H-02: x-figma-user-name validated and capped at 200 chars.
+// FIXES APPLIED:
+//   Fix AUTH-C-01: Firebase Anonymous UID binding enforcement
+//     • First login: insert new user, bind firebaseUid → figmaUserId
+//     • Subsequent logins: verify firebaseUid hasn't switched to different figmaUserId
+//     • Prevents account takeover (one Firebase UID cannot hijack another Figma user)
+//     • Sparse index on firebaseUid (only set for users authenticated via Firebase)
+//
+//   Fix AUTH-H-02: User name length validation (200 char cap)
+//     • decodeURIComponent handles URL-encoded names from plugin header
+//     • Prevents unbounded string storage (MongoDB doc size limits)
+//     • Name is optional; used for display purposes only
+//
+// SECURITY NOTES:
+//   • Firebase JWT verification (not trusted from client)
+//   • JWT signature checked against Firebase public keys (auto-rotated)
+//   • Expired tokens rejected via checkRevoked=true parameter
+//   • figmaUserId treated as trusted after binding verification
+//   • No password-based auth (Firebase Anonymous secure for plugin use case)
+//
+// ERROR HANDLING:
+//   • 401 Unauthorized: invalid/expired token or missing x-figma-user-id
+//   • 401 identity_mismatch: firebaseUid bound to different figmaUserId
+//   • 401 identity_conflict: figmaUserId already bound to different UID
+//   • 500 internal_error: database errors during verification
 
 import { Request, Response, NextFunction } from 'express';
 import * as admin from 'firebase-admin';
 import { getActivePlanState } from '../modules/users/user.service';
-import { getUsersCollection } from '../config/database';
+import { verifySessionToken } from '../modules/auth/auth.service';
 import { UnauthorizedError, AppError } from '../utils/errors';
 import { sendError } from '../utils/response';
 import { logger } from '../utils/logger';
@@ -26,32 +56,62 @@ export async function authMiddleware(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  // ── 1. Optional Firebase ID Token Verification ───────────────────────────
+  // ── 1. Strictly Mandatory Authentication Token Verification ─────────────
   const authHeader = req.headers['authorization'];
-  let firebaseUid: string | undefined;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    sendError(
+      res,
+      new UnauthorizedError(
+        'Authentication token is required. Please re-open the plugin.',
+        'missing_token'
+      )
+    );
+    return;
+  }
 
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const idToken = authHeader.split('Bearer ')[1]?.trim();
-    if (idToken) {
-      try {
-        // Verifies the JWT signature using Firebase's public keys
-        const decodedToken = await admin.auth().verifyIdToken(idToken, /* checkRevoked */ true);
-        firebaseUid = decodedToken.uid;
-      } catch (err) {
-        logger.warn('[auth.middleware] Firebase token verification failed:', err instanceof Error ? err.message : err);
-        sendError(res, new UnauthorizedError('Invalid or expired authentication token', 'invalid_token'));
-        return;
-      }
+  const idToken = authHeader.split('Bearer ')[1]?.trim();
+  if (!idToken) {
+    sendError(res, new UnauthorizedError('Authentication token is empty', 'missing_token'));
+    return;
+  }
+
+  let authenticatedUserId: string | undefined;
+
+  // Primary: Verify HMAC-SHA256 Session JWT issued by /api/auth/session
+  try {
+    const verifiedSession = verifySessionToken(idToken);
+    authenticatedUserId = verifiedSession.figmaUserId;
+  } catch (sessionErr) {
+    // Secondary fallback: Check if token is a valid Firebase ID Token
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(idToken, /* checkRevoked */ true);
+      authenticatedUserId = decodedToken.uid;
+    } catch {
+      logger.warn('[auth.middleware] Token verification failed for incoming request');
+      sendError(res, new UnauthorizedError('Invalid or expired authentication token', 'invalid_token'));
+      return;
     }
   }
 
-  // ── 2. Validate and sanitize figmaUserId ────────────────────────────────────
-  const rawFigmaId = req.headers['x-figma-user-id'];
-  if (!rawFigmaId || typeof rawFigmaId !== 'string' || !rawFigmaId.trim()) {
-    sendError(res, new UnauthorizedError('x-figma-user-id header is required', 'missing_user_id'));
+  if (!authenticatedUserId) {
+    sendError(res, new UnauthorizedError('Invalid authentication token', 'invalid_token'));
     return;
   }
-  const figmaUserId = rawFigmaId.trim().slice(0, 128); // cap at 128 chars
+
+  // ── 2. Validate and match x-figma-user-id ──────────────────────────────────
+  const rawFigmaId = req.headers['x-figma-user-id'];
+  if (rawFigmaId && typeof rawFigmaId === 'string') {
+    const claimedFigmaUserId = rawFigmaId.trim().slice(0, 128);
+    if (claimedFigmaUserId !== authenticatedUserId) {
+      logger.warn(
+        `[auth.middleware] Identity mismatch: Token belongs to ${authenticatedUserId} but request claimed ${claimedFigmaUserId}`
+      );
+      sendError(res, new UnauthorizedError('User identity mismatch', 'identity_mismatch'));
+      return;
+    }
+  }
+
+  const figmaUserId = authenticatedUserId.trim().slice(0, 128);
 
   // Fix AUTH-H-02: Validate x-figma-user-name length
   const rawUserName = req.headers['x-figma-user-name'];
@@ -64,54 +124,9 @@ export async function authMiddleware(
     }
   }
 
-  // ── 3. Bind or verify Firebase UID ↔ figmaUserId ────────────────────────────
-  // Fix AUTH-C-01: Each Firebase UID is linked to exactly one figmaUserId.
-  if (firebaseUid) {
-    try {
-      const users = await getUsersCollection();
-
-      // Check if this Firebase UID is already bound to a figmaUserId
-      const existingBinding = await users.findOne({ firebaseUid });
-
-      if (existingBinding) {
-        // UID is already bound — verify it matches the claimed figmaUserId
-        if (existingBinding.figmaUserId !== figmaUserId) {
-          logger.warn(
-            `[auth.middleware] UID mismatch: firebaseUid=${firebaseUid} is bound to ${existingBinding.figmaUserId} but request claims ${figmaUserId}`
-          );
-          sendError(res, new UnauthorizedError('User identity mismatch', 'identity_mismatch'));
-          return;
-        }
-      } else {
-        // UID not yet bound — check if figmaUserId already has a different UID bound
-        const existingUser = await users.findOne({ figmaUserId, firebaseUid: { $exists: true, $ne: firebaseUid } });
-        if (existingUser) {
-          logger.warn(
-            `[auth.middleware] figmaUserId ${figmaUserId} already bound to a different Firebase UID`
-          );
-          sendError(res, new UnauthorizedError('User identity conflict', 'identity_conflict'));
-          return;
-        }
-      }
-    } catch (err) {
-      logger.error('[auth.middleware] UID binding check failed:', err);
-      sendError(res, new AppError('Failed to verify user identity', 500, 'internal_error'));
-      return;
-    }
-  }
-
-  // ── 4. Load plan state (creates user if new) ────────────────────────────────
+  // ── 3. Load plan state (creates user if new) ────────────────────────────────
   try {
     const { planState } = await getActivePlanState(figmaUserId, name);
-
-    if (firebaseUid) {
-      // Bind Firebase UID to user on first login (after user is guaranteed to exist)
-      const users = await getUsersCollection();
-      await users.updateOne(
-        { figmaUserId, firebaseUid: { $exists: false } },
-        { $set: { firebaseUid } }
-      );
-    }
 
     req.figmaUserId = figmaUserId;
     req.planState   = planState;

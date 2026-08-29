@@ -37,8 +37,8 @@ function createMockResponse() {
 
 describe('Express Middlewares Suite', () => {
   describe('auth.middleware', () => {
-    it('sends 401 Unauthorized when x-figma-user-id header is missing', async () => {
-      const req: any = { headers: {} };
+    it('sends 401 Unauthorized when authorization header is missing', async () => {
+      const req: any = { headers: { 'x-figma-user-id': 'user_123' } };
       const { res, getStatusCode, getBody } = createMockResponse();
 
       let nextCalled = false;
@@ -48,11 +48,11 @@ describe('Express Middlewares Suite', () => {
 
       assert.strictEqual(nextCalled, false);
       assert.strictEqual(getStatusCode(), 401);
-      assert.strictEqual(getBody().error, 'missing_user_id');
+      assert.strictEqual(getBody().error, 'missing_token');
     });
 
-    it('sends 401 Unauthorized when x-figma-user-id is blank whitespace', async () => {
-      const req: any = { headers: { 'x-figma-user-id': '   ' } };
+    it('sends 401 Unauthorized when token is invalid or tampered', async () => {
+      const req: any = { headers: { authorization: 'Bearer invalid.fake.token', 'x-figma-user-id': 'user_123' } };
       const { res, getStatusCode, getBody } = createMockResponse();
 
       let nextCalled = false;
@@ -62,7 +62,7 @@ describe('Express Middlewares Suite', () => {
 
       assert.strictEqual(nextCalled, false);
       assert.strictEqual(getStatusCode(), 401);
-      assert.strictEqual(getBody().error, 'missing_user_id');
+      assert.strictEqual(getBody().error, 'invalid_token');
     });
   });
 
